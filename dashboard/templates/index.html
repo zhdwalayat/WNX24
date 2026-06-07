@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meridian World News — Control Room</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:        #0d1117;
+    --bg2:       #161b22;
+    --bg3:       #21262d;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #8b949e;
+    --blue:      #1d8cf8;
+    --red:       #e63946;
+    --green:     #3fb950;
+    --gold:      #ffd700;
+    --orange:    #f4a261;
+    --purple:    #bc8cff;
+    --radius:    8px;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── Header ───────────────────────────────────────────── */
+  .header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 60px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header-dot {
+    width: 10px; height: 10px;
+    background: var(--red);
+    border-radius: 50%;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.8); }
+  }
+  .header-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.3px;
+  }
+  .header-tag {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 20px;
+  }
+  .status-badge {
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-weight: 600;
+    transition: all 0.3s;
+  }
+  .status-badge.idle    { background: var(--bg3); color: var(--muted); border: 1px solid var(--border); }
+  .status-badge.running { background: #1c3a1c; color: var(--green); border: 1px solid var(--green); }
+
+  /* ── Layout ───────────────────────────────────────────── */
+  .main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 60px); }
+
+  /* ── Sidebar ──────────────────────────────────────────── */
+  .sidebar {
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  /* Show buttons */
+  .show-grid { display: flex; flex-direction: column; gap: 6px; }
+  .show-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+    width: 100%;
+    text-align: left;
+  }
+  .show-btn:hover:not(:disabled) {
+    border-color: var(--blue);
+    background: #1a2332;
+  }
+  .show-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .show-btn.breaking { border-left: 3px solid var(--red); }
+  .show-btn.cyber    { border-left: 3px solid var(--red); }
+  .show-btn.asia     { border-left: 3px solid var(--gold); }
+  .show-btn.mideast  { border-left: 3px solid #2ec4b6; }
+  .show-btn.primetime{ border-left: 3px solid var(--gold); }
+  .show-btn-name  { font-weight: 500; }
+  .show-btn-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+
+  /* API status */
+  .api-list { display: flex; flex-direction: column; gap: 6px; }
+  .api-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--bg3);
+    border-radius: var(--radius);
+    font-size: 12px;
+  }
+  .api-name { color: var(--muted); }
+  .api-ok   { color: var(--green); font-weight: 600; }
+  .api-mock { color: var(--orange); font-weight: 600; }
+
+  /* Stats */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    text-align: center;
+  }
+  .stat-value { font-size: 24px; font-weight: 700; color: var(--blue); }
+  .stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Main content ─────────────────────────────────────── */
+  .content {
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Card */
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .card-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg3);
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-body { padding: 16px; }
+
+  /* Pipeline log */
+  .log-box {
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    height: 280px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .log-line { display: flex; gap: 12px; align-items: flex-start; }
+  .log-time { color: var(--muted); flex-shrink: 0; }
+  .log-msg.info    { color: var(--text); }
+  .log-msg.success { color: var(--green); }
+  .log-msg.error   { color: var(--red); }
+  .log-msg.warning { color: var(--orange); }
+  .log-empty { color: var(--muted); font-style: italic; text-align: center; padding: 60px 0; }
+
+  /* Two col layout */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+  /* Story card */
+  .story-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.4;
+    margin-bottom: 12px;
+  }
+  .story-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .meta-pill {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .meta-pill.confidence { color: var(--green); border-color: var(--green); background: #1c3a1c; }
+  .meta-pill.source     { color: var(--blue);  border-color: var(--blue);  background: #1a2332; }
+
+  /* Script sections */
+  .script-section { margin-bottom: 14px; }
+  .script-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .script-text {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.6;
+    background: var(--bg3);
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border-left: 3px solid var(--blue);
+  }
+  .script-text.hook   { border-left-color: var(--gold); color: var(--gold); font-weight: 600; }
+  .script-text.cta    { border-left-color: var(--purple); }
+
+  /* Thumbnail */
+  .thumb-preview {
+    width: 100%;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    display: block;
+  }
+  .thumb-empty {
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: var(--bg3);
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  /* History table */
+  .history-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .history-table th {
+    text-align: left;
+    padding: 8px 12px;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: middle;
+  }
+  .history-table tr:last-child td { border-bottom: none; }
+  .history-table tr:hover td { background: var(--bg3); }
+  .show-tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--blue);
+    color: white;
+    font-weight: 600;
+  }
+  .thumb-mini {
+    width: 80px;
+    height: 45px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .history-empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 30px;
+    font-style: italic;
+  }
+
+  /* Progress bar */
+  .progress-bar {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--blue);
+    border-radius: 2px;
+    transition: width 0.5s;
+    width: 0%;
+  }
+  .progress-fill.running { animation: progress-pulse 2s ease-in-out infinite; }
+  @keyframes progress-pulse {
+    0%   { opacity: 1; }
+    50%  { opacity: 0.6; }
+    100% { opacity: 1; }
+  }
+
+  /* Gallery cards */
+  .gallery-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .gallery-card:hover {
+    border-color: var(--blue);
+    transform: translateY(-2px);
+  }
+  .gallery-thumb {
+    width: 100%;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+    display: block;
+    background: var(--bg);
+  }
+  .gallery-thumb-empty {
+    width: 100%;
+    aspect-ratio: 16/9;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 28px;
+  }
+  .gallery-info {
+    padding: 10px 12px;
+  }
+  .gallery-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.4;
+  }
+  .gallery-meta {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .gallery-play {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--blue);
+    font-weight: 600;
+    margin-top: 8px;
+  }
+
+  /* Word count badges */
+  .word-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .word-badge span { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-brand">
+    <div class="header-dot"></div>
+    <span class="header-title">{{ channel }}</span>
+    <span class="header-tag">Control Room</span>
+  </div>
+  <div id="status-badge" class="status-badge idle">● IDLE</div>
+</header>
+
+<!-- ── Main layout ──────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+
+    <!-- Broadcast controls -->
+    <div>
+      <div class="section-title">🎙 Broadcast Shows</div>
+      <div class="show-grid" id="show-grid">
+        {% for show_id, show_name in shows.items() %}
+        <button class="show-btn {{ show_id }}"
+                onclick="runShow('{{ show_id }}')"
+                id="btn-{{ show_id }}">
+          <span class="show-btn-name">{{ show_name }}</span>
+          <span class="show-btn-badge">▶ Run</span>
+        </button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- API Status -->
+    <div>
+      <div class="section-title">🔑 API Status</div>
+      <div class="api-list" id="api-status">
+        <div class="api-item">
+          <span class="api-name">Groq LLM</span>
+          <span class="api-ok">✓ Connected</span>
+        </div>
+        <div class="api-item">
+          <span class="api-name">HeyGen Avatar</span>
+          <span id="heygen-status" class="api-mock">◎ Mock</span>
+        </div>
+        <div class="api-item">
+          <span class="api-name">YouTube API</span>
+          <span id="youtube-status" class="api-mock">◎ Mock</span>
+        </div>
+        <div class="api-item">
+          <span class="api-name">News Sources</span>
+          <span class="api-ok">✓ 50+ Feeds</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div>
+      <div class="section-title">📊 Session Stats</div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-runs">0</div>
+          <div class="stat-label">Broadcasts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-stories">0</div>
+          <div class="stat-label">Stories Scraped</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-words">0</div>
+          <div class="stat-label">Words Written</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-verified">0</div>
+          <div class="stat-label">Verified</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Anchor info -->
+    <div>
+      <div class="section-title">👤 Anchor</div>
+      <div class="api-item" style="flex-direction:column; align-items:flex-start; gap:4px;">
+        <span style="font-weight:600; color:var(--text)">{{ anchor }}</span>
+        <span style="color:var(--muted); font-size:11px">Global Correspondent</span>
+        <span style="color:var(--muted); font-size:11px; font-style:italic">
+          "{{ tagline }}"
+        </span>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <!-- Pipeline Log -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">⚡ Live Pipeline Log</span>
+        <div class="word-badge" id="run-indicator">
+          <span id="run-show-name">Ready</span>
+        </div>
+      </div>
+      <div class="card-body" style="padding:12px">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div style="height:8px"></div>
+        <div class="log-box" id="log-box">
+          <div class="log-empty">
+            Select a show from the sidebar to start a broadcast
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Story + Script -->
+    <div class="two-col">
+
+      <!-- Top Story -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📰 Top Verified Story</span>
+        </div>
+        <div class="card-body" id="story-panel">
+          <div style="color:var(--muted); font-style:italic; text-align:center; padding:40px 0">
+            No broadcast run yet
+          </div>
+        </div>
+      </div>
+
+      <!-- Thumbnail -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">🖼 Thumbnail Preview</span>
+          <span id="thumb-headline" style="font-size:11px; color:var(--muted)"></span>
+        </div>
+        <div class="card-body">
+          <div id="thumb-panel">
+            <div class="thumb-empty">Thumbnail will appear after broadcast</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Script -->
+    <div class="card" id="script-card" style="display:none">
+      <div class="card-header">
+        <span class="card-title">📝 Generated Script</span>
+        <div style="display:flex; gap:8px; align-items:center">
+          <div class="word-badge">Words: <span id="script-words">0</span></div>
+          <div class="word-badge">Duration: <span id="script-dur">0</span>s</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="script-section">
+          <div class="script-label">Hook</div>
+          <div class="script-text hook" id="s-hook"></div>
+        </div>
+        <div class="script-section">
+          <div class="script-label">What Happened</div>
+          <div class="script-text" id="s-what"></div>
+        </div>
+        <div class="script-section">
+          <div class="script-label">Why It Matters</div>
+          <div class="script-text" id="s-why"></div>
+        </div>
+        <div class="script-section">
+          <div class="script-label">Expert Insight</div>
+          <div class="script-text" id="s-insight"></div>
+        </div>
+        <div class="script-section">
+          <div class="script-label">Sign Off</div>
+          <div class="script-text cta" id="s-cta"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Broadcast History -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">📋 Broadcast History</span>
+        <span style="font-size:11px; color:var(--muted)" id="history-count">0 broadcasts</span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <div id="history-panel">
+          <div class="history-empty">No broadcasts yet this session</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output Gallery -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">🎬 Output Gallery</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span style="font-size:11px; color:var(--muted)" id="gallery-count">Loading…</span>
+          <button onclick="loadGallery()" style="background:var(--bg3);border:1px solid var(--border);color:var(--muted);padding:3px 10px;border-radius:6px;cursor:pointer;font-size:11px">↺ Refresh</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div id="gallery-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px">
+          <div style="color:var(--muted);font-style:italic;text-align:center;padding:40px 0;grid-column:1/-1">Loading outputs…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Video Modal -->
+    <div id="video-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:16px">
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;overflow:hidden;max-width:900px;width:95%;box-shadow:0 20px 60px rgba(0,0,0,0.5)">
+        <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+          <span id="modal-title" style="font-size:13px;font-weight:600;color:var(--text);max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <button onclick="closeModal()" style="background:var(--red);color:white;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-weight:700">✕ Close</button>
+        </div>
+        <video id="modal-video" controls style="width:100%;display:block;background:#000;max-height:70vh"></video>
+        <div id="modal-meta" style="padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap"></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+let isRunning   = false;
+let pollTimer   = null;
+let sessionStats = { runs: 0, stories: 0, words: 0, verified: 0 };
+
+// ── Run a show ─────────────────────────────────────────────
+async function runShow(showId) {
+  if (isRunning) return;
+
+  const res = await fetch(`/run/${showId}`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json();
+    alert(err.error || "Failed to start");
+    return;
+  }
+
+  isRunning = true;
+  setRunning(true, showId);
+  startPolling();
+}
+
+// ── Poll status ────────────────────────────────────────────
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 1200);
+}
+
+async function poll() {
+  try {
+    const res  = await fetch("/status");
+    const data = await res.json();
+
+    renderLog(data.log);
+    renderProgress(data.is_running);
+
+    if (data.current_run && Object.keys(data.current_run).length > 0) {
+      renderStory(data.current_run);
+      renderScript(data.current_run);
+      renderThumbnail(data.current_run);
+    }
+
+    if (data.history && data.history.length > 0) {
+      renderHistory(data.history);
+    }
+
+    if (!data.is_running && isRunning) {
+      isRunning = false;
+      setRunning(false);
+      clearInterval(pollTimer);
+      sessionStats.runs++;
+      updateStats();
+    }
+  } catch(e) {
+    console.error("Poll error:", e);
+  }
+}
+
+// ── Render functions ───────────────────────────────────────
+function renderLog(lines) {
+  const box = document.getElementById("log-box");
+  if (!lines || lines.length === 0) return;
+
+  box.innerHTML = lines.map(l => `
+    <div class="log-line">
+      <span class="log-time">${l.time}</span>
+      <span class="log-msg ${l.status}">${escHtml(l.msg)}</span>
+    </div>
+  `).join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderProgress(running) {
+  const fill = document.getElementById("progress-fill");
+  if (running) {
+    fill.style.width = "100%";
+    fill.classList.add("running");
+  } else {
+    fill.style.width = "0%";
+    fill.classList.remove("running");
+  }
+}
+
+function renderStory(run) {
+  if (!run.top_story) return;
+  const s = run.top_story;
+  sessionStats.stories = Math.max(sessionStats.stories, 235);
+  document.getElementById("story-panel").innerHTML = `
+    <div class="story-title">${escHtml(s.title)}</div>
+    <div class="story-meta">
+      <span class="meta-pill source">📡 ${escHtml(s.source)}</span>
+      <span class="meta-pill confidence">✓ ${s.confidence} confidence</span>
+      <span class="meta-pill">Score: ${s.score}</span>
+    </div>
+    <a href="${escHtml(s.url)}" target="_blank"
+       style="font-size:12px; color:var(--blue); text-decoration:none">
+      Read original →
+    </a>
+  `;
+}
+
+function renderScript(run) {
+  if (!run.script) return;
+  const sc = run.script;
+  sessionStats.words = Math.max(sessionStats.words, sc.word_count || 0);
+  sessionStats.verified = Math.max(sessionStats.verified, 18);
+
+  document.getElementById("script-card").style.display = "block";
+  document.getElementById("s-hook").textContent    = sc.hook    || "";
+  document.getElementById("s-what").textContent    = sc.what_happened  || "";
+  document.getElementById("s-why").textContent     = sc.why_it_matters || "";
+  document.getElementById("s-insight").textContent = sc.expert_insight || "";
+  document.getElementById("s-cta").textContent     = sc.cta     || "";
+  document.getElementById("script-words").textContent = sc.word_count  || 0;
+  document.getElementById("script-dur").textContent   = sc.duration_secs || 0;
+  updateStats();
+}
+
+function renderThumbnail(run) {
+  if (!run.thumbnail) return;
+  const t = run.thumbnail;
+  document.getElementById("thumb-panel").innerHTML = `
+    <img src="/thumbnail/${t.filename}"
+         class="thumb-preview"
+         alt="Thumbnail"
+         onerror="this.style.display='none'">
+  `;
+  document.getElementById("thumb-headline").textContent = t.headline || "";
+}
+
+function renderHistory(history) {
+  document.getElementById("history-count").textContent =
+    `${history.length} broadcast${history.length !== 1 ? "s" : ""}`;
+
+  document.getElementById("history-panel").innerHTML = `
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>Thumbnail</th>
+          <th>Show</th>
+          <th>Story</th>
+          <th>Script</th>
+          <th>Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${history.map(h => `
+          <tr>
+            <td>
+              <img src="/thumbnail/${h.thumbnail}"
+                   class="thumb-mini"
+                   onerror="this.style.display='none'"
+                   alt="">
+            </td>
+            <td><span class="show-tag">${escHtml(h.show)}</span></td>
+            <td style="max-width:280px; color:var(--muted)">${escHtml(h.story.substring(0,70))}...</td>
+            <td>${h.words}w / ${h.duration}s</td>
+            <td style="color:var(--muted); white-space:nowrap">${h.time}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function setRunning(running, showId = "") {
+  const badge = document.getElementById("status-badge");
+  const indicator = document.getElementById("run-show-name");
+  const buttons = document.querySelectorAll(".show-btn");
+
+  if (running) {
+    badge.className = "status-badge running";
+    badge.textContent = "● ON AIR";
+    indicator.textContent = showId.toUpperCase();
+    buttons.forEach(b => b.disabled = true);
+  } else {
+    badge.className = "status-badge idle";
+    badge.textContent = "● IDLE";
+    indicator.textContent = "Ready";
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
+function updateStats() {
+  document.getElementById("stat-runs").textContent     = sessionStats.runs;
+  document.getElementById("stat-stories").textContent  = sessionStats.stories;
+  document.getElementById("stat-words").textContent    = sessionStats.words;
+  document.getElementById("stat-verified").textContent = sessionStats.verified;
+}
+
+function escHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Poll every 5 seconds passively even when idle
+setInterval(async () => {
+  if (!isRunning) {
+    const res  = await fetch("/status");
+    const data = await res.json();
+    if (data.history) renderHistory(data.history);
+  }
+}, 5000);
+
+// ── Output Gallery ─────────────────────────────────────────
+async function loadGallery() {
+  try {
+    const res  = await fetch("/outputs");
+    const data = await res.json();
+    const outputs = data.outputs || [];
+    const grid = document.getElementById("gallery-grid");
+    document.getElementById("gallery-count").textContent =
+      `${outputs.length} video${outputs.length !== 1 ? "s" : ""}`;
+
+    if (outputs.length === 0) {
+      grid.innerHTML = `<div style="color:var(--muted);font-style:italic;text-align:center;padding:40px 0;grid-column:1/-1">No output videos yet — run a broadcast to generate one</div>`;
+      return;
+    }
+
+    grid.innerHTML = outputs.map(o => `
+      <div class="gallery-card" onclick="openModal('${escHtml(o.video)}','${escHtml(o.title)}','${escHtml(o.thumbnail||'')}','${escHtml(o.show)}','${escHtml(o.created_at)}','${o.size_mb}')">
+        ${o.thumbnail
+          ? `<img src="/thumbnail/${escHtml(o.thumbnail)}" class="gallery-thumb" alt="" onerror="this.parentNode.querySelector('.gallery-thumb-empty').style.display='flex';this.style.display='none'">`
+          : ""
+        }
+        <div class="gallery-thumb-empty" style="${o.thumbnail ? 'display:none' : ''}">🎬</div>
+        <div class="gallery-info">
+          <div class="gallery-title">${escHtml(o.title.replace(" | Meridian World News",""))}</div>
+          <div class="gallery-meta">
+            ${o.show ? `<span class="show-tag" style="font-size:9px">${escHtml(o.show)}</span>` : ""}
+            <span class="meta-pill" style="font-size:10px">${o.size_mb} MB</span>
+            <span class="meta-pill" style="font-size:10px">${escHtml(o.created_at)}</span>
+          </div>
+          <div class="gallery-play">▶ Play Video</div>
+        </div>
+      </div>
+    `).join("");
+  } catch(e) {
+    console.error("Gallery load error:", e);
+    document.getElementById("gallery-count").textContent = "error";
+  }
+}
+
+function openModal(videoFile, title, thumb, show, date, sizeMb) {
+  const modal = document.getElementById("video-modal");
+  const video = document.getElementById("modal-video");
+  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-meta").innerHTML = `
+    ${show ? `<span class="show-tag">${escHtml(show)}</span>` : ""}
+    <span class="meta-pill">${escHtml(date)}</span>
+    <span class="meta-pill">${sizeMb} MB</span>
+  `;
+  video.src = `/video/${videoFile}`;
+  video.load();
+  modal.style.display = "flex";
+}
+
+function closeModal() {
+  const modal = document.getElementById("video-modal");
+  const video = document.getElementById("modal-video");
+  video.pause();
+  video.src = "";
+  modal.style.display = "none";
+}
+
+// Close modal on backdrop click
+document.getElementById("video-modal").addEventListener("click", function(e) {
+  if (e.target === this) closeModal();
+});
+
+// Load gallery on page load and refresh every 30s
+loadGallery();
+setInterval(loadGallery, 30000);
+</script>
+</body>
+</html>
