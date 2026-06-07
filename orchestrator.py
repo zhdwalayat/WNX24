@@ -1,7 +1,11 @@
 # orchestrator.py
 import os
 import time
+import json
 import schedule
+from pathlib import Path
+
+HISTORY_FILE = "output/metadata/broadcast_history.json"
 from datetime import datetime, timezone
 from loguru import logger
 from typing import Set
@@ -17,7 +21,27 @@ from config.settings import config
 
 # ── Deduplication tracker ──────────────────────────────────
 # Tracks story IDs already broadcast — prevents repeats
-broadcast_history: Set[str] = set()
+def _load_history() -> Set[str]:
+    try:
+        path = Path(HISTORY_FILE)
+        if path.exists():
+            data = json.loads(path.read_text())
+            logger.info(f"Loaded {len(data)} stories from broadcast history")
+            return set(data)
+    except Exception as e:
+        logger.warning(f"Could not load broadcast history: {e}")
+    return set()
+
+def _save_history() -> None:
+    try:
+        Path(HISTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(HISTORY_FILE).write_text(
+            json.dumps(list(broadcast_history), indent=2)
+        )
+    except Exception as e:
+        logger.warning(f"Could not save broadcast history: {e}")
+
+broadcast_history: Set[str] = _load_history()
 
 # ── Single broadcast run ───────────────────────────────────
 def run_broadcast(show_id: str) -> bool:
@@ -28,7 +52,7 @@ def run_broadcast(show_id: str) -> bool:
 
     logger.info(f"")
     logger.info(f"{'='*50}")
-    logger.info(f"  MERIDIAN WORLD NEWS -- {show.name.upper()}")
+    logger.info(f"  MNN — {show.name.upper()}")
     logger.info(f"  {datetime.now().strftime('%d %b %Y  |  %H:%M PKT')}")
     logger.info(f"{'='*50}")
 
@@ -117,9 +141,11 @@ def run_broadcast(show_id: str) -> bool:
 
         if url:
             package.status = VideoStatus.UPLOADED
-            # Mark stories as broadcast
+            # Mark stories as broadcast and persist
             for s in top_stories:
                 broadcast_history.add(s.raw.id)
+            _save_history()
+            logger.info(f"Broadcast history saved — {len(broadcast_history)} total stories")
 
             logger.info(f"")
             logger.info(f"  BROADCAST COMPLETE")
@@ -140,21 +166,14 @@ def run_broadcast(show_id: str) -> bool:
 
 # ── Regional filter ────────────────────────────────────────
 def _filter_regional(stories, focus: str):
-    source_map = {
-        "asia":     config.content.asia_sources,
-        "mideast":  config.content.mideast_sources,
-        "cyber":    config.content.cyber_sources,
-        "affairs":  config.content.affairs_sources,
-        "economy":  config.content.economy_sources,
-        "science":  config.content.science_sources,
-        "health":   config.content.health_sources,
-        "conflict": config.content.conflict_sources,
-    }
-    sources = source_map.get(focus, [])
-    if not sources:
+    if focus == "asia":
+        sources = config.content.asia_sources
+    elif focus == "mideast":
+        sources = config.content.mideast_sources
+    elif focus == "cyber":
+        sources = config.content.conflict_sources
+    else:
         return stories
-    filtered = [s for s in stories if s.raw.source_name in sources]
-    return filtered if filtered else stories  # fallback to all if none found
 
 
 # ── Breaking news checker ──────────────────────────────────
@@ -219,7 +238,7 @@ def run_now(show_id: str = "breaking"):
 def start_24_7():
     """Start the full 24/7 broadcast scheduler."""
     logger.info("")
-    logger.info("MERIDIAN WORLD NEWS -- GOING LIVE")
+    logger.info("MNN — MERIDIAN NEWS NETWORK — GOING LIVE")
     logger.info("24/7 Broadcast Scheduler")
     logger.info("")
 

@@ -18,7 +18,7 @@ def main():
 
     logger.info("")
     logger.info("╔══════════════════════════════════════════╗")
-    logger.info("║      MERIDIAN WORLD NEWS — STARTING      ║")
+    logger.info("║   MNN — MERIDIAN NEWS NETWORK — STARTING   ║")
     logger.info("║      'Where the world meets.'            ║")
     logger.info("╚══════════════════════════════════════════╝")
     logger.info("")

@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List
 from loguru import logger
 from groq import Groq
@@ -8,6 +9,53 @@ from config.settings import config, ShowConfig
 
 client = Groq(api_key=config.api.groq_api_key)
 MODEL  = "llama-3.3-70b-versatile"  # mixtral decommissioned; 70b versatile is Groq's recommended replacement
+
+def _call_groq_with_retry(
+    messages: list,
+    max_tokens: int = 2000,
+    temperature: float = 0.7,
+    max_retries: int = 3,
+) -> str:
+    """
+    Call Groq API with exponential backoff retry.
+    Retries on rate limit, timeout, or empty response.
+    """
+    delays = [5, 15, 30]   # seconds between retries
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model       = MODEL,
+                messages    = messages,
+                temperature = temperature,
+                max_tokens  = max_tokens,
+            )
+            content = response.choices[0].message.content
+
+            # Reject if response is too short
+            if not content or len(content.split()) < 30:
+                raise ValueError(
+                    f"Response too short: {len(content.split())} words"
+                )
+
+            return content
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = delays[attempt]
+                logger.warning(
+                    f"Groq API attempt {attempt + 1} failed: {e} "
+                    f"— retrying in {wait}s"
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    f"Groq API failed after {max_retries} attempts: {e}"
+                )
+                raise
+
+    raise RuntimeError("Groq API failed — all retries exhausted")
+
 
 # ── Prompt builder ─────────────────────────────────────────
 def build_prompt(
@@ -36,7 +84,7 @@ def build_prompt(
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
     return f"""
-You are a senior broadcast journalist at MERIDIAN WORLD NEWS.
+You are a senior broadcast journalist at MERIDIAN NEWS NETWORK.
 Your job is to write a complete, full-length broadcast script.
 
 SHOW:      {show.name}
@@ -93,7 +141,7 @@ REQUIREMENT: Minimum 40 words. Write at least 3 sentences.
 [SIGN_OFF]
 REQUIREMENT: Use exactly these two lines:
 "{config.anchor.sign_off}"
-"This was {show.name} on Meridian World News."
+"This was {show.name} on MNN — Meridian News Network."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FINAL CHECK BEFORE SUBMITTING:
@@ -206,7 +254,7 @@ def write_script(
                 "role":    "system",
                 "content": (
                     "You are a senior broadcast journalist at "
-                    "Meridian World News. You write clean, "
+                    "Meridian News Network. You write clean, "
                     "authoritative, globally inclusive scripts. "
                     "Always follow the exact format requested."
                 )
@@ -275,7 +323,7 @@ Summary: {s.raw.summary[:300]}
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
     prompt = f"""
-You are the head scriptwriter for MERIDIAN WORLD NEWS.
+You are the head scriptwriter for MERIDIAN NEWS NETWORK.
 Write a {show.name} script covering {len(stories)} stories.
 
 ANCHOR:    {config.anchor.name}
@@ -308,7 +356,7 @@ What is the bigger picture?
 
 [SIGN_OFF]
 "{config.anchor.sign_off}"
-"This was {show.name} on Meridian World News."
+"This was {show.name} on MNN — Meridian News Network."
 
 RULES:
 - Simple clear English. Anyone can understand.
@@ -324,7 +372,7 @@ RULES:
                 "role":    "system",
                 "content": (
                     "You are a senior broadcast journalist at "
-                    "Meridian World News."
+                    "Meridian News Network."
                 )
             },
             {

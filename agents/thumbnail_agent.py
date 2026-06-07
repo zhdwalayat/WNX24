@@ -105,7 +105,7 @@ def create_thumbnail(
     # Channel name
     draw.text(
         (24, 38),
-        "Meridian World News",
+        "Meridian News Network",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(36, bold=True),
         anchor = "lm",
@@ -220,7 +220,7 @@ def create_thumbnail(
     )
     draw.text(
         (W // 2, H - 30),
-        f"Meridian World News  |  {timestamp}",
+        f"Meridian News Network  |  {timestamp}",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(22),
         anchor = "mm",
@@ -253,7 +253,7 @@ def run_thumbnail_agent(
     show_id: str = "breaking",
 ) -> Thumbnail:
 
-    logger.info("Starting Thumbnail Agent — Meridian World News")
+    logger.info("Starting Thumbnail Agent — Meridian News Network")
     thumbnail = create_thumbnail(story, script, show_id)
     logger.info(f"Thumbnail Agent complete — {thumbnail.image_path}")
     return thumbnail

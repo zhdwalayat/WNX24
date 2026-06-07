@@ -17,7 +17,7 @@ def build_metadata(package: VideoPackage) -> dict:
     script = package.script
 
     # Title — SEO optimised
-    title = f"{script.hook[:60]} | Meridian World News"
+    title = f"{script.hook[:60]} | Meridian News Network"
     if len(title) > 100:
         title = title[:97] + "..."
 
@@ -29,7 +29,7 @@ def build_metadata(package: VideoPackage) -> dict:
 {script.why_it_matters}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 Meridian World News
+🌐 MNN — Meridian News Network
 "{config.channel.tagline}"
 
 Covering AI, Cybersecurity, and Global Technology News
@@ -40,14 +40,14 @@ from Pakistan, the Middle East, Asia, and the World.
 📅 {datetime.now().strftime("%d %B %Y  |  %H:%M PKT")}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-#MeridianWorldNews #AINews #TechNews #CyberSecurity
+#MeridianNewsNetwork #MNN #AINews #TechNews #CyberSecurity
 #BreakingNews #ArtificialIntelligence #GlobalNews
 #PakistanNews #MiddleEast #AsiaNews #TechToday
 """
 
     # Tags — SEO keywords
     tags = [
-        "Meridian World News",
+        "Meridian News Network",
         "AI news", "artificial intelligence",
         "tech news today", "cybersecurity news",
         "breaking news", "global news",

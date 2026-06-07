@@ -132,24 +132,24 @@ class AnchorConfig:
         "calm, authoritative, globally inclusive — "
         "trusted by audiences from Karachi to Tokyo"
     )
-    sign_off: str = "Stay informed. Stay ahead. This is Meridian."
+    sign_off: str = "Stay informed. Stay ahead. This is MNN."
     opens: Dict[str, str] = field(default_factory=lambda: {
-        "breaking":     "Breaking news on Meridian World News.",
-        "morning":      "Good morning. This is Meridian World News.",
+        "breaking":     "Breaking news on MNN.",
+        "morning":      "Good morning. This is MNN.",
         "world_affairs":"Welcome to World Affairs on Meridian.",
         "asia":         "From across Asia, this is Meridian's Asia Tech Report.",
         "economy":      "Markets are moving. This is Meridian Markets & Economy.",
-        "midday":       "Midday on Meridian World News.",
+        "midday":       "Midday on MNN.",
         "deep_dive":    "Time for a deeper look. This is Meridian Deep Dive.",
         "science":      "Exploring our world. This is Meridian Science & Climate Watch.",
         "mideast":      "From the Middle East and South Asia, this is Meridian.",
         "health":       "Your health matters. This is Meridian Health & Medicine.",
-        "evening":      "Good evening. This is Meridian World News.",
+        "evening":      "Good evening. This is MNN.",
         "cybersecurity":"Cyber threats are evolving. This is Meridian Cybersecurity Watch.",
         "conflict":     "From conflict zones around the world, this is Meridian.",
-        "primetime":    "Prime time on Meridian World News.",
-        "summary":      "Here is your complete daily summary from Meridian World News.",
-        "default":      "This is Meridian.",
+        "primetime":    "Prime time on MNN.",
+        "summary":      "Here is your complete daily summary from MNN.",
+        "default":      "This is MNN.",
     })
 
 @dataclass
@@ -168,9 +168,9 @@ class ShowConfig:
 
 @dataclass
 class ChannelConfig:
-    name:     str = "Meridian World News"
-    tagline:  str = "Stay informed. Stay ahead."
-    handle:   str = "@MeridianWorldNews"
+    name:     str = "Meridian News Network"
+    tagline:  str = "Where the world meets."
+    handle:   str = "@MeridianNN"
     language: str = "en"
     category_id: str = "25"   # YouTube: News & Politics
 

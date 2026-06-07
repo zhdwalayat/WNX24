@@ -110,7 +110,7 @@ def _build_frame(headline: str, subtext: str, frame_w: int, frame_h: int) -> "Im
         ch_font = ImageFont.truetype(FONT_BOLD, 36)
     except Exception:
         ch_font = ImageFont.load_default()
-    draw.text((40, 40), "MERIDIAN WORLD NEWS", fill=TICKER_COLOUR, font=ch_font)
+    draw.text((40, 40), "MERIDIAN NEWS NETWORK", fill=TICKER_COLOUR, font=ch_font)
     draw.line([(40, 86), (frame_w - 40, 86)], fill=ACCENT_COLOUR, width=3)
 
     # ── Anchor placeholder silhouette ─────────────────────
@@ -221,7 +221,7 @@ def generate_local_video(script: VideoScript) -> AvatarVideo:
 
 # ── Main agent function ────────────────────────────────────
 def run_avatar_agent(script: VideoScript) -> AvatarVideo:
-    logger.info("Starting Avatar Agent — Meridian World News (local TTS + video)")
+    logger.info("Starting Avatar Agent — Meridian News Network (local TTS + video)")
 
     video = generate_local_video(script)
 
