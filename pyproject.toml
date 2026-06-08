@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "aiofiles>=25.1.0",
+    "apscheduler>=3.11.2",
     "beautifulsoup4>=4.14.3",
     "edge-tts>=7.2.8",
     "fastapi>=0.135.3",
@@ -22,6 +23,7 @@ dependencies = [
     "pydantic>=2.13.0",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.26",
+    "pytz>=2026.2",
     "requests>=2.33.1",
     "schedule>=1.2.2",
     "uvicorn>=0.44.0",

@@ -310,3 +310,109 @@ async def list_outputs():
         })
 
     return JSONResponse({"outputs": items})
+
+
+# ── Health endpoint ────────────────────────────────────────
+@app.get("/health")
+async def health_check():
+    from core.database import get_stats
+    from datetime import datetime, timezone
+
+    # Check DB
+    try:
+        stats = get_stats()
+        db_ok = True
+    except Exception:
+        stats = {}
+        db_ok = False
+
+    # Check last broadcast time
+    last_broadcast          = None
+    last_broadcast_age_mins = None
+    if broadcast_history and current_run.get("completed_at"):
+        try:
+            last_dt = datetime.fromisoformat(
+                current_run["completed_at"]
+            )
+            last_broadcast = last_dt.strftime("%d %b %Y %H:%M PKT")
+            diff = datetime.now() - last_dt.replace(tzinfo=None)
+            last_broadcast_age_mins = int(diff.total_seconds() / 60)
+        except Exception:
+            pass
+
+    # Check API keys
+    api_status = {
+        "groq":    bool(config.api.groq_api_key),
+        "heygen":  bool(config.api.heygen_api_key),
+        "youtube": bool(config.api.youtube_api_key),
+    }
+
+    # Overall system status
+    critical_ok = db_ok and api_status["groq"]
+    status      = "healthy" if critical_ok else "degraded"
+
+    return JSONResponse({
+        "status":        status,
+        "channel":       config.channel.name,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "timestamp_pkt": datetime.now().strftime("%d %b %Y %H:%M PKT"),
+        "pipeline": {
+            "is_running":              is_running,
+            "last_broadcast":          last_broadcast,
+            "last_broadcast_age_mins": last_broadcast_age_mins,
+            "total_broadcasts":        len(broadcast_history),
+        },
+        "database": {
+            "ok":        db_ok,
+            "new":       stats.get("new",       0),
+            "broadcast": stats.get("broadcast", 0),
+            "rejected":  stats.get("rejected",  0),
+        },
+        "api_keys": api_status,
+        "shows":    len(config.scheduler.shows),
+        "version":  "1.0.0",
+    }, status_code=200 if status == "healthy" else 503)
+
+
+# ── Corrections endpoint ───────────────────────────────────
+@app.post("/correct/{story_id}")
+async def flag_correction(story_id: str, note: str = ""):
+    """Flag a broadcast story as incorrect."""
+    try:
+        from core.database import get_conn
+        conn = get_conn()
+        row  = conn.execute(
+            "SELECT * FROM broadcasts WHERE story_id=?",
+            (story_id,)
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            return JSONResponse(
+                {"error": "Broadcast not found"},
+                status_code=404
+            )
+
+        correction_note = (
+            f"\n\n⚠️ CORRECTION ({datetime.now().strftime('%d %b %Y')}): "
+            + (note or "This story has been updated. "
+               "Please refer to our latest coverage.")
+        )
+
+        _log(
+            f"Correction flagged for story {story_id}: {note}",
+            "warning"
+        )
+
+        return JSONResponse({
+            "status":      "flagged",
+            "story_id":    story_id,
+            "note":        correction_note,
+            "youtube_url": row["youtube_url"] or "",
+        })
+
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )

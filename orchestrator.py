@@ -1,30 +1,29 @@
 # orchestrator.py
 import os
-import time
+import sys
 import json
-import schedule
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Set, List
 from pathlib import Path
-
-HISTORY_FILE = "output/metadata/broadcast_history.json"
-from datetime import datetime, timezone
 from loguru import logger
-from typing import Set
 
-from agents.trend_detection_agent import run_trend_detection
-from agents.verification_agent import run_verification
-from agents.script_writer_agent import run_script_writer
-from agents.avatar_agent import run_avatar_agent
-from agents.thumbnail_agent import run_thumbnail_agent
-from agents.uploader_agent import run_uploader_agent
-from core.models import VideoPackage, VideoStatus
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+from pytz import timezone as pytz_timezone
+
+from config.settings import config
 from core.database import (
     init_db, get_fresh_stories,
-    mark_broadcast, save_broadcast, get_stats
+    mark_broadcast, save_broadcast,
+    get_stats
 )
-from config.settings import config
 
-# ── Deduplication tracker ──────────────────────────────────
-# Tracks story IDs already broadcast — prevents repeats
+# ── Broadcast history persistence ─────────────────────────
+HISTORY_FILE = "output/metadata/broadcast_history.json"
+
 def _load_history() -> Set[str]:
     try:
         path = Path(HISTORY_FILE)
@@ -47,22 +46,39 @@ def _save_history() -> None:
 
 broadcast_history: Set[str] = _load_history()
 
-# ── Single broadcast run ───────────────────────────────────
+# ── PKT timezone ───────────────────────────────────────────
+PKT = pytz_timezone("Asia/Karachi")
+
+# ── Regional source filter ─────────────────────────────────
+def _get_sources_for_focus(focus: str) -> List[str]:
+    source_map = {
+        "asia":     config.content.asia_sources,
+        "mideast":  config.content.mideast_sources,
+        "affairs":  config.content.affairs_sources,
+        "economy":  config.content.economy_sources,
+        "science":  config.content.science_sources,
+        "health":   config.content.health_sources,
+        "conflict": config.content.conflict_sources,
+    }
+    return source_map.get(focus, [])
+
+# ── Single broadcast ───────────────────────────────────────
 def run_broadcast(show_id: str) -> bool:
     show = config.scheduler.shows.get(show_id)
     if not show:
         logger.error(f"Unknown show: {show_id}")
         return False
 
-    logger.info(f"")
-    logger.info(f"{'='*50}")
+    logger.info("")
+    logger.info("=" * 52)
     logger.info(f"  MNN — {show.name.upper()}")
-    logger.info(f"  {datetime.now().strftime('%d %b %Y  |  %H:%M PKT')}")
-    logger.info(f"{'='*50}")
+    logger.info(f"  {datetime.now(PKT).strftime('%d %b %Y  |  %H:%M PKT')}")
+    logger.info("=" * 52)
 
     try:
-        # ── Read from database (no scraping, no tokens) ──
-        logger.info(f"[1/6] Reading from MNN database...")
+        # ── Step 1: Read from DB ───────────────────────────
+        logger.info("[1/6] Reading stories from MNN database...")
+
         source_names = None
         if show.regional_focus != "global":
             source_names = _get_sources_for_focus(
@@ -73,47 +89,42 @@ def run_broadcast(show_id: str) -> bool:
             limit          = 50,
             min_confidence = config.content.min_confidence_score,
             source_names   = source_names,
-            max_age_hours  = show.lookback_minutes // 60 or 24,
+            max_age_hours  = max(1, show.lookback_minutes // 60),
         )
 
-        # Fallback — if DB is empty, scrape directly
-        if not fresh:
-            logger.warning(
-                "DB empty — falling back to live scraping"
-            )
-            stories  = run_trend_detection()
-            verified = run_verification(stories)
-            fresh    = verified
-
-        stats = get_stats()
-        logger.info(
-            f"        DB has {stats['new']} fresh stories "
-            f"| Using top {min(len(fresh), show.story_count)}"
-        )
-
-        # Filter already broadcast stories
+        # Filter already broadcast
         fresh = [
             s for s in fresh
             if s.raw.id not in broadcast_history
         ]
 
+        # Fallback — DB empty, scrape live
         if not fresh:
-            logger.warning("No fresh verified stories -- skipping broadcast")
+            logger.warning(
+                "DB empty or all stories broadcast — "
+                "falling back to live scraping"
+            )
+            from agents.trend_detection_agent import run_trend_detection
+            from agents.verification_agent import run_verification
+            stories  = run_trend_detection()
+            verified = run_verification(stories)
+            fresh    = [
+                s for s in verified
+                if s.raw.id not in broadcast_history
+            ]
+
+        if not fresh:
+            logger.warning("No fresh stories — skipping broadcast")
             return False
 
-        logger.info(f"      {len(fresh)} fresh verified stories")
+        stats = get_stats()
+        logger.info(
+            f"       {stats.get('verified', len(fresh))} stories in DB "
+            f"| {len(fresh)} fresh | "
+            f"Using top {min(len(fresh), show.story_count)}"
+        )
 
-        # Filter by show's regional focus
-        if show.regional_focus != "global":
-            focused = _filter_regional(fresh, show.regional_focus)
-            if focused:
-                fresh = focused
-                logger.info(
-                    f"      {len(fresh)} after regional filter "
-                    f"({show.regional_focus})"
-                )
-
-        # Filter by minimum score
+        # Apply min score filter
         scored = [
             s for s in fresh
             if s.raw.score >= show.min_score
@@ -121,40 +132,43 @@ def run_broadcast(show_id: str) -> bool:
         if scored:
             fresh = scored
 
-        # Take top N stories for this show
         top_stories = fresh[:show.story_count]
-
         logger.info(
-            f"      Top story: "
-            f"{top_stories[0].raw.title[:55]}"
+            f"       Top: {top_stories[0].raw.title[:55]}"
         )
 
-        # ── Step 3: Script Writer ──────────────────────────
-        logger.info(f"[3/6] Script Writer...")
+        # ── Step 2: Script ─────────────────────────────────
+        logger.info("[2/6] Generating broadcast script...")
+        from agents.script_writer_agent import run_script_writer
         script = run_script_writer(top_stories, show)
         logger.info(
-            f"      {script.word_count} words / "
-            f"{script.duration_secs}s"
+            f"       {script.word_count} words "
+            f"| ~{script.duration_secs}s"
         )
 
-        # ── Step 4: Avatar Generator ───────────────────────
-        logger.info(f"[4/6] Avatar Generator...")
+        # ── Step 3: Avatar ─────────────────────────────────
+        logger.info("[3/6] Rendering avatar video...")
+        from agents.avatar_agent import run_avatar_agent
+        from core.models import VideoStatus
         video = run_avatar_agent(script)
-        logger.info(f"      Status: {video.status}")
+        logger.info(f"       Status: {video.status}")
 
         if video.status == VideoStatus.FAILED:
-            logger.error("Avatar generation failed -- aborting")
+            logger.error("Avatar generation failed — aborting")
             return False
 
-        # ── Step 5: Thumbnail ──────────────────────────────
-        logger.info(f"[5/6] Thumbnail...")
+        # ── Step 4: Thumbnail ──────────────────────────────
+        logger.info("[4/6] Generating thumbnail...")
+        from agents.thumbnail_agent import run_thumbnail_agent
         thumbnail = run_thumbnail_agent(
             top_stories[0], script, show_id
         )
-        logger.info(f"      Saved: {thumbnail.image_path}")
+        logger.info(f"       Saved: {thumbnail.image_path}")
 
-        # ── Step 6: Upload ─────────────────────────────────
-        logger.info(f"[6/6] Uploading...")
+        # ── Step 5: Upload ─────────────────────────────────
+        logger.info("[5/6] Uploading to YouTube...")
+        from agents.uploader_agent import run_uploader_agent
+        from core.models import VideoPackage
         package = VideoPackage(
             story     = top_stories[0],
             script    = script,
@@ -164,72 +178,48 @@ def run_broadcast(show_id: str) -> bool:
         url              = run_uploader_agent(package, show)
         package.youtube_url = url
 
-        if url:
-            package.status = VideoStatus.UPLOADED
-            # Mark stories as broadcast and persist
-            for s in top_stories:
-                broadcast_history.add(s.raw.id)
-            _save_history()
-            logger.info(f"Broadcast history saved — {len(broadcast_history)} total stories")
+        # ── Step 6: Save to DB ─────────────────────────────
+        logger.info("[6/6] Saving broadcast record...")
+        for s in top_stories:
+            broadcast_history.add(s.raw.id)
+            mark_broadcast(s.raw.id, show_id)
 
-            logger.info(f"")
-            logger.info(f"  BROADCAST COMPLETE")
-            logger.info(f"  Show:    {show.name}")
-            logger.info(f"  Title:   {package.title}")
-            logger.info(f"  YouTube: {url}")
-            logger.info(f"")
-            return True
+        save_broadcast(
+            show_id        = show_id,
+            story_id       = top_stories[0].raw.id,
+            script_text    = script.full_text,
+            word_count     = script.word_count,
+            youtube_url    = url or "",
+            thumbnail_path = thumbnail.image_path,
+        )
+        _save_history()
 
-        else:
-            logger.error("Upload failed")
-            return False
+        logger.info("")
+        logger.info(f"  ✓ BROADCAST COMPLETE — {show.name}")
+        logger.info(f"  Title:   {package.title or script.hook}")
+        logger.info(f"  YouTube: {url or 'mock'}")
+        logger.info("")
+        return True
 
     except Exception as e:
-        logger.exception(f"Broadcast failed for {show_id}: {e}")
+        logger.exception(f"Broadcast failed [{show_id}]: {e}")
         return False
 
-
-# ── Regional source lookup (for DB queries) ───────────────
-def _get_sources_for_focus(focus: str) -> list:
-    source_map = {
-        "asia":     config.content.asia_sources,
-        "mideast":  config.content.mideast_sources,
-        "affairs":  config.content.affairs_sources,
-        "economy":  config.content.economy_sources,
-        "science":  config.content.science_sources,
-        "health":   config.content.health_sources,
-        "conflict": config.content.conflict_sources,
-    }
-    return source_map.get(focus, []) or None
-
-
-# ── Regional filter ────────────────────────────────────────
-def _filter_regional(stories, focus: str):
-    if focus == "asia":
-        sources = config.content.asia_sources
-    elif focus == "mideast":
-        sources = config.content.mideast_sources
-    elif focus == "cyber":
-        sources = config.content.conflict_sources
-    else:
-        return stories
-
-
-# ── Breaking news checker ──────────────────────────────────
+# ── Breaking news check ────────────────────────────────────
 def check_breaking_news():
-    show = config.scheduler.shows["breaking"]
+    show   = config.scheduler.shows["breaking"]
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
     logger.info("Checking for breaking news...")
 
     try:
-        stories  = run_trend_detection()
-        verified = run_verification(stories)
-
-        # Breaking news must be published within last 60 minutes
-        from datetime import datetime, timezone, timedelta
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
+        fresh = get_fresh_stories(
+            limit          = 20,
+            min_confidence = config.content.min_confidence_score,
+            max_age_hours  = 1,
+        )
 
         breaking = [
-            s for s in verified
+            s for s in fresh
             if s.raw.score >= show.min_score
             and s.raw.id not in broadcast_history
             and (
@@ -241,92 +231,137 @@ def check_breaking_news():
 
         if breaking:
             logger.info(
-                f"Breaking story detected "
-                f"(published within 60 min): "
+                f"Breaking story detected: "
                 f"{breaking[0].raw.title[:55]}"
             )
             run_broadcast("breaking")
         else:
-            logger.info(
-                "No breaking news detected "
-                "(no stories within 60 min above threshold)"
-            )
+            logger.info("No breaking news — threshold not met")
 
     except Exception as e:
         logger.exception(f"Breaking news check failed: {e}")
 
+# ── Setup APScheduler ──────────────────────────────────────
+def setup_scheduler() -> BlockingScheduler:
+    scheduler = BlockingScheduler(timezone=PKT)
+    shows     = config.scheduler.shows
 
-# ── Schedule all shows ─────────────────────────────────────
-def setup_schedule():
-    shows = config.scheduler.shows
-
-    # Scheduled shows — run at fixed PKT times
     for show_id, show in shows.items():
-        if show.is_breaking:
-            continue   # breaking handled separately
-        if show_id == "week_review":
-            continue   # scheduled separately below
+        if show.is_breaking or show_id == "week_review":
+            continue
 
         for hour in show.schedule_pkt:
-            time_str = f"{hour:02d}:00"
-
             if show_id == "conflict":
-                # Run Mon-Sat at 20:00, skip Sunday (week_review day)
-                schedule.every().monday.at(time_str).do(run_broadcast, show_id=show_id)
-                schedule.every().tuesday.at(time_str).do(run_broadcast, show_id=show_id)
-                schedule.every().wednesday.at(time_str).do(run_broadcast, show_id=show_id)
-                schedule.every().thursday.at(time_str).do(run_broadcast, show_id=show_id)
-                schedule.every().friday.at(time_str).do(run_broadcast, show_id=show_id)
-                schedule.every().saturday.at(time_str).do(run_broadcast, show_id=show_id)
-                logger.info(f"Scheduled: {show.name:35s} at {time_str} PKT (Mon-Sat only)")
+                # Mon-Sat only — skip Sunday
+                for day in ["mon","tue","wed","thu","fri","sat"]:
+                    scheduler.add_job(
+                        run_broadcast,
+                        CronTrigger(
+                            day_of_week = day,
+                            hour        = hour,
+                            minute      = 0,
+                            timezone    = PKT,
+                        ),
+                        kwargs    = {"show_id": show_id},
+                        id        = f"{show_id}_{day}",
+                        name      = f"{show.name} ({day})",
+                        max_instances = 1,
+                        coalesce  = True,
+                    )
+                logger.info(
+                    f"Scheduled: {show.name:35s} "
+                    f"{hour:02d}:00 PKT (Mon-Sat)"
+                )
             else:
-                schedule.every().day.at(time_str).do(run_broadcast, show_id=show_id)
-                logger.info(f"Scheduled: {show.name:35s} at {time_str} PKT")
+                scheduler.add_job(
+                    run_broadcast,
+                    CronTrigger(
+                        hour     = hour,
+                        minute   = 0,
+                        timezone = PKT,
+                    ),
+                    kwargs        = {"show_id": show_id},
+                    id            = show_id,
+                    name          = show.name,
+                    max_instances = 1,
+                    coalesce      = True,
+                )
+                logger.info(
+                    f"Scheduled: {show.name:35s} "
+                    f"{hour:02d}:00 PKT (daily)"
+                )
 
-    # Week in Review — Sunday only at 20:00
-    schedule.every().sunday.at("20:00").do(
-        run_broadcast, show_id="week_review"
+    # Week in Review — Sunday only
+    scheduler.add_job(
+        run_broadcast,
+        CronTrigger(
+            day_of_week = "sun",
+            hour        = 20,
+            minute      = 0,
+            timezone    = PKT,
+        ),
+        kwargs        = {"show_id": "week_review"},
+        id            = "week_review",
+        name          = "MNN Week in Review",
+        max_instances = 1,
+        coalesce      = True,
     )
-    logger.info("Scheduled: MNN Week in Review — every Sunday 20:00 PKT")
+    logger.info(
+        f"Scheduled: MNN Week in Review              "
+        f"20:00 PKT (Sunday)"
+    )
 
-    # Breaking news — check every 30 minutes
-    schedule.every(30).minutes.do(check_breaking_news)
-    logger.info("Scheduled: Breaking News Check every 30 minutes")
+    # Breaking news — every 30 minutes
+    scheduler.add_job(
+        check_breaking_news,
+        IntervalTrigger(minutes=30, timezone=PKT),
+        id            = "breaking_check",
+        name          = "Breaking News Check",
+        max_instances = 1,
+        coalesce      = True,
+    )
+    logger.info(
+        "Scheduled: Breaking News Check              "
+        "every 30 minutes"
+    )
 
+    return scheduler
 
-# ── Main entry points ──────────────────────────────────────
+# ── Entry points ───────────────────────────────────────────
 def run_now(show_id: str = "breaking"):
     """Run a single broadcast immediately — for testing."""
+    init_db()
     run_broadcast(show_id)
 
-
 def start_24_7():
-    """Start the full 24/7 broadcast scheduler."""
-    logger.info("")
-    logger.info("MNN — MERIDIAN NEWS NETWORK — GOING LIVE")
-    logger.info("24/7 Broadcast Scheduler")
-    logger.info("")
-
-    setup_schedule()
+    """Start the full 24/7 APScheduler broadcast system."""
+    init_db()
 
     logger.info("")
+    logger.info("╔══════════════════════════════════════════════╗")
+    logger.info("║    MNN — MERIDIAN NEWS NETWORK — GOING LIVE  ║")
+    logger.info("║         24/7 Broadcast Scheduler             ║")
+    logger.info("╚══════════════════════════════════════════════╝")
+    logger.info("")
+
+    scheduler = setup_scheduler()
+
+    logger.info("")
+    logger.info(f"Total jobs scheduled: {len(scheduler.get_jobs())}")
     logger.info("Scheduler running. Press Ctrl+C to stop.")
     logger.info("")
 
-    # Run breaking news check immediately on start
+    # Run breaking check immediately on start
     check_breaking_news()
 
-    # Keep running
-    while True:
-        schedule.run_pending()
-        time.sleep(60)   # check every minute
-
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("MNN scheduler stopped.")
+        scheduler.shutdown()
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 1:
-        # Run specific show: python orchestrator.py morning
         run_now(sys.argv[1])
     else:
-        # Start full 24/7 scheduler
         start_24_7()

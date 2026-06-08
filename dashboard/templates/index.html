@@ -800,6 +800,7 @@ function renderHistory(history) {
           <th>Story</th>
           <th>Script</th>
           <th>Time</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -815,6 +816,15 @@ function renderHistory(history) {
             <td style="max-width:280px; color:var(--muted)">${escHtml(h.story.substring(0,70))}...</td>
             <td>${h.words}w / ${h.duration}s</td>
             <td style="color:var(--muted); white-space:nowrap">${h.time}</td>
+            <td>
+              <button onclick="flagCorrection('${escHtml(h.story_id||'')}', '${escHtml(h.story.substring(0,30))}')"
+                      style="font-family:var(--font-mono);font-size:9px;
+                             color:var(--gold);background:none;
+                             border:1px solid var(--border);
+                             border-radius:3px;padding:2px 6px;cursor:pointer">
+                ⚑ Flag
+              </button>
+            </td>
           </tr>
         `).join("")}
       </tbody>
@@ -854,6 +864,28 @@ function escHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+async function flagCorrection(storyId, title) {
+  if (!storyId) {
+    alert('Story ID not available for this broadcast.');
+    return;
+  }
+  const note = prompt(
+    `Flag "${title}" as incorrect?\n\nEnter correction note (optional):`
+  );
+  if (note === null) return;   // user cancelled
+
+  const res = await fetch(
+    `/correct/${storyId}?note=${encodeURIComponent(note)}`,
+    { method: 'POST' }
+  );
+  const data = await res.json();
+  if (data.status === 'flagged') {
+    alert('Story flagged. YouTube description will be updated.');
+  } else {
+    alert('Error: ' + (data.error || 'Unknown error'));
+  }
 }
 
 // Poll every 5 seconds passively even when idle
