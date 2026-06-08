@@ -74,7 +74,7 @@ def draw_rounded_rect(
     draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill)
 
 
-def make_headline(title: str, max_words: int = 10) -> str:
+def make_headline(title: str, max_words: int = 5) -> str:
     words = title.split()
     if len(words) <= max_words:
         return title.upper()

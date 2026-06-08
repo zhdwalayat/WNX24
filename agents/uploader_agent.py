@@ -6,13 +6,42 @@ from loguru import logger
 from typing import Optional
 
 from core.models import VideoPackage, VideoStatus
-from config.settings import config
+from config.settings import config, ShowConfig
 
 # ── YouTube category IDs ───────────────────────────────────
 CATEGORY_ID = "25"   # 25 = News & Politics on YouTube
 
+# ── Auto-generate YouTube timestamp chapters ───────────────
+def build_chapters(script, show) -> str:
+    wpm = config.content.words_per_minute
+
+    def words_to_time(words: int) -> str:
+        secs = int((words / wpm) * 60)
+        mins = secs // 60
+        secs = secs % 60
+        return f"{mins}:{secs:02d}"
+
+    chapters = ["0:00 Introduction"]
+    offset   = 15   # words for hook + open
+
+    if script.what_happened:
+        chapters.append(f"{words_to_time(offset)} What Happened")
+        offset += len(script.what_happened.split())
+
+    if script.why_it_matters:
+        chapters.append(f"{words_to_time(offset)} Why It Matters")
+        offset += len(script.why_it_matters.split())
+
+    if script.expert_insight:
+        chapters.append(f"{words_to_time(offset)} Analysis")
+        offset += len(script.expert_insight.split())
+
+    chapters.append(f"{words_to_time(offset)} Sign Off")
+
+    return "\n".join(chapters)
+
 # ── Generate video metadata ────────────────────────────────
-def build_metadata(package: VideoPackage) -> dict:
+def build_metadata(package: VideoPackage, show: ShowConfig = None) -> dict:
     story  = package.story.raw
     script = package.script
 
@@ -22,11 +51,15 @@ def build_metadata(package: VideoPackage) -> dict:
         title = title[:97] + "..."
 
     # Description — structured for YouTube SEO
+    chapters = build_chapters(script, show) if show else ""
+
     description = f"""{script.hook}
 
 {script.what_happened}
 
 {script.why_it_matters}
+
+{chapters}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🌐 MNN — Meridian News Network
@@ -173,10 +206,10 @@ def _mock_upload(package: VideoPackage, metadata: dict) -> str:
 
 
 # ── Main agent function ────────────────────────────────────
-def run_uploader_agent(package: VideoPackage) -> str:
+def run_uploader_agent(package: VideoPackage, show: ShowConfig = None) -> str:
     logger.info(f"Uploader Agent — {package.story.raw.title[:50]}")
 
-    metadata = build_metadata(package)
+    metadata = build_metadata(package, show)
     package.title       = metadata["title"]
     package.description = metadata["description"]
     package.tags        = metadata["tags"]

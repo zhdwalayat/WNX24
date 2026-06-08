@@ -161,7 +161,7 @@ def run_broadcast(show_id: str) -> bool:
             video     = video,
             thumbnail = thumbnail,
         )
-        url              = run_uploader_agent(package)
+        url              = run_uploader_agent(package, show)
         package.youtube_url = url
 
         if url:
@@ -264,16 +264,30 @@ def setup_schedule():
     for show_id, show in shows.items():
         if show.is_breaking:
             continue   # breaking handled separately
+        if show_id == "week_review":
+            continue   # scheduled separately below
 
         for hour in show.schedule_pkt:
             time_str = f"{hour:02d}:00"
-            schedule.every().day.at(time_str).do(
-                run_broadcast, show_id=show_id
-            )
-            logger.info(
-                f"Scheduled: {show.name:35s} "
-                f"at {time_str} PKT"
-            )
+
+            if show_id == "conflict":
+                # Run Mon-Sat at 20:00, skip Sunday (week_review day)
+                schedule.every().monday.at(time_str).do(run_broadcast, show_id=show_id)
+                schedule.every().tuesday.at(time_str).do(run_broadcast, show_id=show_id)
+                schedule.every().wednesday.at(time_str).do(run_broadcast, show_id=show_id)
+                schedule.every().thursday.at(time_str).do(run_broadcast, show_id=show_id)
+                schedule.every().friday.at(time_str).do(run_broadcast, show_id=show_id)
+                schedule.every().saturday.at(time_str).do(run_broadcast, show_id=show_id)
+                logger.info(f"Scheduled: {show.name:35s} at {time_str} PKT (Mon-Sat only)")
+            else:
+                schedule.every().day.at(time_str).do(run_broadcast, show_id=show_id)
+                logger.info(f"Scheduled: {show.name:35s} at {time_str} PKT")
+
+    # Week in Review — Sunday only at 20:00
+    schedule.every().sunday.at("20:00").do(
+        run_broadcast, show_id="week_review"
+    )
+    logger.info("Scheduled: MNN Week in Review — every Sunday 20:00 PKT")
 
     # Breaking news — check every 30 minutes
     schedule.every(30).minutes.do(check_breaking_news)

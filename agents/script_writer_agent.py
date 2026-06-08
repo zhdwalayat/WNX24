@@ -1,11 +1,23 @@
 import os
 import time
 from typing import List
+from datetime import datetime, timezone, timedelta
 from loguru import logger
 from groq import Groq
 
 from core.models import VerifiedStory, VideoScript
 from config.settings import config, ShowConfig
+
+
+def is_developing_story(story: VerifiedStory, hours: int = 2) -> bool:
+    """True if the story was published within the last `hours` hours."""
+    try:
+        pub = story.raw.published_at
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        return pub >= datetime.now(timezone.utc) - timedelta(hours=hours)
+    except Exception:
+        return False
 
 client = Groq(api_key=config.api.groq_api_key)
 MODEL  = "llama-3.3-70b-versatile"  # mixtral decommissioned; 70b versatile is Groq's recommended replacement
@@ -80,6 +92,12 @@ def build_prompt(
         "cybersecurity": "Technical but accessible. Explain threats in plain English.",
         "primetime":     "Authoritative and compelling. This is the biggest story of the day.",
         "summary":       "Comprehensive but concise. Cover everything efficiently.",
+        "explainer":     "Simple, clear, educational. Explain one concept "
+                         "so a 15-year-old understands it completely. "
+                         "Use analogies. Avoid all jargon.",
+        "week_review":   "Reflective and comprehensive. Summarise the week "
+                         "with authority. Connect stories to show the bigger "
+                         "picture of what the week meant for the world.",
     }
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
@@ -155,6 +173,71 @@ STRICT STYLE RULES:
 — For health stories: never cause alarm. Always note viewers should
   consult medical professionals. Never give specific medical advice.
 — Total word count MUST be {word_target} words or more.
+"""
+
+# ── Explainer prompt builder ───────────────────────────────
+def build_explainer_prompt(story: VerifiedStory, show: ShowConfig) -> str:
+    anchor_open = config.anchor.opens.get("explainer")
+    word_target = max(200, (show.video_duration // 60) * config.content.words_per_minute)
+
+    return f"""
+You are a senior broadcast journalist at MNN — Meridian News Network.
+Write an EXPLAINER script for Aria. This is not a news bulletin.
+This is an educational segment that explains ONE story or concept simply.
+
+ANCHOR:    {config.anchor.name}
+OPEN WITH: "{anchor_open}"
+SIGN OFF:  "{config.anchor.sign_off}"
+TARGET:    {word_target} words minimum
+
+STORY:
+Title:   {story.raw.title}
+Source:  {story.raw.source_name}
+Summary: {story.raw.summary}
+
+EXPLAINER FORMAT — write exactly these sections:
+
+[HOOK]
+One question that makes the audience think.
+Example: "Why does a decision in Washington affect your grocery bill in Karachi?"
+Maximum 20 words.
+
+[OPEN]
+Use exactly: "{anchor_open}"
+
+[THE_BASICS]
+REQUIREMENT: Minimum 50 words.
+Explain the background simply. Assume the audience knows nothing.
+Answer: What is this? Who is involved? Why does it exist?
+Use simple analogies. No jargon.
+
+[WHAT_HAPPENED]
+REQUIREMENT: Minimum 50 words.
+According to {story.raw.source_name}, what specifically happened?
+Keep it simple and factual. One development at a time.
+
+[WHY_IT_MATTERS]
+REQUIREMENT: Minimum 50 words.
+Why should a person in Pakistan, the Gulf, or Asia care?
+Use: "For Pakistan and the region, this means..."
+Connect to daily life — jobs, prices, safety, technology.
+
+[THE_BIG_PICTURE]
+REQUIREMENT: Minimum 40 words.
+What does this tell us about where the world is heading?
+Analysts suggest... / Experts note... / Observers say...
+What should the audience watch for next?
+
+[SIGN_OFF]
+"{config.anchor.sign_off}"
+"This was MNN Explainer on Meridian News Network."
+
+RULES:
+— Use simple language. Short sentences. Maximum 15 words each.
+— Use analogies: "Think of it like..."
+— Never use jargon without immediately explaining it.
+— British English spelling.
+— Total MUST be {word_target} words or more.
 """
 
 # ── Script parser ──────────────────────────────────────────
@@ -309,6 +392,12 @@ Summary: {s.raw.summary[:300]}
         "cybersecurity": "Technical but accessible. Explain threats in plain English.",
         "primetime":     "Authoritative and compelling. This is the biggest story of the day.",
         "summary":       "Comprehensive but concise. Cover everything efficiently.",
+        "explainer":     "Simple, clear, educational. Explain one concept "
+                         "so a 15-year-old understands it completely. "
+                         "Use analogies. Avoid all jargon.",
+        "week_review":   "Reflective and comprehensive. Summarise the week "
+                         "with authority. Connect stories to show the bigger "
+                         "picture of what the week meant for the world.",
     }
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
@@ -404,22 +493,40 @@ def run_script_writer(
 ) -> VideoScript:
 
     if not config.api.groq_api_key:
-        raise ValueError(
-            "Groq API key missing. "
-            "Add GROQ_API_KEY to your .env file."
+        raise ValueError("GROQ_API_KEY missing from .env")
+
+    # Use dedicated explainer prompt
+    if show.id == "explainer":
+        prompt = build_explainer_prompt(stories[0], show)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior broadcast journalist at MNN. "
+                    "You specialise in explaining complex stories "
+                    "simply and clearly. You never use jargon. "
+                    "You always follow the exact format requested."
+                )
+            },
+            {"role": "user", "content": prompt}
+        ]
+        raw_script = _call_groq_with_retry(
+            messages    = messages,
+            max_tokens  = 2000,
+            temperature = 0.6,
+        )
+        return parse_script(raw_script, stories[0].raw.id, show)
+
+    # Use week review prompt
+    if show.id == "week_review":
+        return write_multi_script(
+            stories[:show.story_count], show
         )
 
-    for attempt in range(1, 4):
-        try:
-            if show.story_count == 1 or len(stories) == 1:
-                return write_script(stories[0], show)
-            else:
-                return write_multi_script(
-                    stories[:show.story_count],
-                    show
-                )
-        except ValueError as e:
-            if attempt < 3:
-                logger.warning(f"Script attempt {attempt} failed: {e} — retrying...")
-            else:
-                raise
+    # Standard flow
+    if show.story_count == 1 or len(stories) == 1:
+        return write_script(stories[0], show)
+    else:
+        return write_multi_script(
+            stories[:show.story_count], show
+        )

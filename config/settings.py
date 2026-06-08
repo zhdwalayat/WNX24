@@ -142,6 +142,8 @@ class AnchorConfig:
         "conflict":     "From conflict zones around the world, this is Meridian.",
         "primetime":    "Prime time on MNN.",
         "summary":      "Here is your complete daily summary from MNN.",
+        "explainer":    "Welcome to MNN Explainer. I'm Aria. Today we break down one story simply.",
+        "week_review":  "Good evening. I'm Aria. This is the MNN Week in Review.",
         "default":      "This is MNN.",
     })
 
@@ -185,6 +187,18 @@ class SchedulerConfig:
             interval_minutes=1440, lookback_minutes=480,
             video_duration=300, story_count=5,
             min_score=30.0,
+        ),
+
+        "explainer": ShowConfig(
+            id               = "explainer",
+            name             = "MNN Explainer",
+            anchor_open      = "explainer",
+            schedule_pkt     = [8],
+            interval_minutes = 1440,
+            lookback_minutes = 480,
+            video_duration   = 150,
+            story_count      = 1,
+            min_score        = 25.0,
         ),
 
         "world_affairs": ShowConfig(
@@ -281,6 +295,18 @@ class SchedulerConfig:
             interval_minutes=1440, lookback_minutes=1440,
             video_duration=600, story_count=10,
             min_score=20.0,
+        ),
+
+        "week_review": ShowConfig(
+            id               = "week_review",
+            name             = "MNN Week in Review",
+            anchor_open      = "week_review",
+            schedule_pkt     = [20],
+            interval_minutes = 10080,
+            lookback_minutes = 10080,
+            video_duration   = 600,
+            story_count      = 5,
+            min_score        = 20.0,
         ),
     })
 
