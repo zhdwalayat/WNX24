@@ -25,9 +25,8 @@ class ContentConfig:
     keywords: List[str] = field(default_factory=lambda: [
         # ── AI & Technology ───────────────────────────────
         "artificial intelligence", "AI", "machine learning",
-        "LLM", "GPT", "Claude", "Gemini", "cybersecurity",
-        "data breach", "OpenAI", "Anthropic", "ransomware",
-        "zero-day", "AGI", "AI regulation", "robotics",
+        "LLM", "GPT", "Claude", "Gemini",
+        "OpenAI", "Anthropic", "AGI", "AI regulation", "robotics",
         "deepfake", "neural network", "chatbot", "automation",
         "quantum computing", "semiconductor", "tech policy",
 
@@ -87,12 +86,6 @@ class ContentConfig:
         "Al Monitor", "MENAFN", "Wamda", "Al Jazeera",
         "Arab News", "Gulf News", "Middle East Eye",
         "Iran International", "Al Arabiya",
-    ])
-
-    cyber_sources: List[str] = field(default_factory=lambda: [
-        "The Hacker News", "Krebs Security", "Bleeping Computer",
-        "Dark Reading", "SecurityWeek", "Threatpost",
-        "CISA Alerts", "Naked Security",
     ])
 
     affairs_sources: List[str] = field(default_factory=lambda: [
@@ -264,14 +257,6 @@ class SchedulerConfig:
             interval_minutes=1440, lookback_minutes=360,
             video_duration=180, story_count=3,
             min_score=40.0,
-        ),
-
-        "cybersecurity": ShowConfig(
-            id="cybersecurity", name="Cybersecurity Watch",
-            anchor_open="cybersecurity", schedule_pkt=[19],
-            interval_minutes=1440, lookback_minutes=480,
-            video_duration=180, story_count=3,
-            min_score=20.0, regional_focus="cyber",
         ),
 
         "conflict": ShowConfig(

@@ -17,6 +17,10 @@ from agents.avatar_agent import run_avatar_agent
 from agents.thumbnail_agent import run_thumbnail_agent
 from agents.uploader_agent import run_uploader_agent
 from core.models import VideoPackage, VideoStatus
+from core.database import (
+    init_db, get_fresh_stories,
+    mark_broadcast, save_broadcast, get_stats
+)
 from config.settings import config
 
 # ── Deduplication tracker ──────────────────────────────────
@@ -57,18 +61,39 @@ def run_broadcast(show_id: str) -> bool:
     logger.info(f"{'='*50}")
 
     try:
-        # ── Step 1: Trend Detection ────────────────────────
-        logger.info(f"[1/6] Trend Detection...")
-        stories = run_trend_detection()
-        logger.info(f"      {len(stories)} stories scraped")
+        # ── Read from database (no scraping, no tokens) ──
+        logger.info(f"[1/6] Reading from MNN database...")
+        source_names = None
+        if show.regional_focus != "global":
+            source_names = _get_sources_for_focus(
+                show.regional_focus
+            )
 
-        # ── Step 2: Verification ───────────────────────────
-        logger.info(f"[2/6] Verification...")
-        verified = run_verification(stories)
+        fresh = get_fresh_stories(
+            limit          = 50,
+            min_confidence = config.content.min_confidence_score,
+            source_names   = source_names,
+            max_age_hours  = show.lookback_minutes // 60 or 24,
+        )
+
+        # Fallback — if DB is empty, scrape directly
+        if not fresh:
+            logger.warning(
+                "DB empty — falling back to live scraping"
+            )
+            stories  = run_trend_detection()
+            verified = run_verification(stories)
+            fresh    = verified
+
+        stats = get_stats()
+        logger.info(
+            f"        DB has {stats['new']} fresh stories "
+            f"| Using top {min(len(fresh), show.story_count)}"
+        )
 
         # Filter already broadcast stories
         fresh = [
-            s for s in verified
+            s for s in fresh
             if s.raw.id not in broadcast_history
         ]
 
@@ -164,6 +189,20 @@ def run_broadcast(show_id: str) -> bool:
         return False
 
 
+# ── Regional source lookup (for DB queries) ───────────────
+def _get_sources_for_focus(focus: str) -> list:
+    source_map = {
+        "asia":     config.content.asia_sources,
+        "mideast":  config.content.mideast_sources,
+        "affairs":  config.content.affairs_sources,
+        "economy":  config.content.economy_sources,
+        "science":  config.content.science_sources,
+        "health":   config.content.health_sources,
+        "conflict": config.content.conflict_sources,
+    }
+    return source_map.get(focus, []) or None
+
+
 # ── Regional filter ────────────────────────────────────────
 def _filter_regional(stories, focus: str):
     if focus == "asia":
@@ -185,21 +224,33 @@ def check_breaking_news():
         stories  = run_trend_detection()
         verified = run_verification(stories)
 
-        # Only trigger if score exceeds breaking threshold
+        # Breaking news must be published within last 60 minutes
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
+
         breaking = [
             s for s in verified
             if s.raw.score >= show.min_score
             and s.raw.id not in broadcast_history
+            and (
+                s.raw.published_at.replace(tzinfo=timezone.utc)
+                if s.raw.published_at.tzinfo is None
+                else s.raw.published_at
+            ) >= cutoff
         ]
 
         if breaking:
             logger.info(
-                f"Breaking story detected: "
+                f"Breaking story detected "
+                f"(published within 60 min): "
                 f"{breaking[0].raw.title[:55]}"
             )
             run_broadcast("breaking")
         else:
-            logger.info("No breaking news detected")
+            logger.info(
+                "No breaking news detected "
+                "(no stories within 60 min above threshold)"
+            )
 
     except Exception as e:
         logger.exception(f"Breaking news check failed: {e}")

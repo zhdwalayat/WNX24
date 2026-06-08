@@ -7,6 +7,7 @@ from loguru import logger
 
 from core.models import VideoScript, AvatarVideo, VideoStatus
 from config.settings import config
+from video.heygen_client import heygen
 
 # ── Directories ────────────────────────────────────────────
 ASSETS_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "assets"

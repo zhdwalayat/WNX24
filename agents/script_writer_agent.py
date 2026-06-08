@@ -84,8 +84,8 @@ def build_prompt(
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
     return f"""
-You are a senior broadcast journalist at MERIDIAN NEWS NETWORK.
-Your job is to write a complete, full-length broadcast script.
+You are a senior broadcast journalist at MERIDIAN NEWS NETWORK (MNN).
+Write a complete, professional broadcast script for Aria to read on air.
 
 SHOW:      {show.name}
 TONE:      {tone}
@@ -93,12 +93,9 @@ ANCHOR:    {config.anchor.name}
 OPEN WITH: "{anchor_open}"
 SIGN OFF:  "{config.anchor.sign_off}"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MANDATORY WORD COUNT: {word_target} WORDS MINIMUM
-You will be penalised for submitting under {word_target} words.
-Count your words before submitting.
-Thin scripts are not acceptable for broadcast.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY WORD COUNT: {word_target} words minimum.
+Count every word before submitting. Scripts under {word_target - 20} words
+will be rejected and rebroadcast will fail.
 
 STORY:
 Title:   {story.raw.title}
@@ -106,62 +103,58 @@ Source:  {story.raw.source_name}
 Summary: {story.raw.summary}
 URL:     {story.raw.url}
 
-WRITE EACH SECTION IN FULL. DO NOT SUMMARISE.
+WRITE EACH SECTION IN FULL — DO NOT SUMMARISE:
 
 [HOOK]
-REQUIREMENT: 1 sentence, maximum 15 words.
-Write a punchy opening that grabs attention immediately.
-Example style: "A billionaire tech leader was attacked — and the world is watching."
+REQUIREMENT: 1 punchy sentence, maximum 15 words.
+Grab attention immediately. Make the audience stop scrolling.
 
 [OPEN]
 REQUIREMENT: Use exactly this line:
 "{anchor_open}"
 
 [WHAT_HAPPENED]
-REQUIREMENT: Minimum 60 words. Write at least 5 sentences.
-- Sentence 1: What happened, who was involved, where, when.
-- Sentence 2: Background — who is this person or company.
-- Sentence 3: Details of the event — what exactly occurred.
-- Sentence 4: Immediate response — what happened next.
-- Sentence 5: Current status — where things stand right now.
-Do NOT summarise. Write every sentence in full.
+REQUIREMENT: Minimum 60 words. At least 5 sentences.
+— Sentence 1: Begin with "According to {story.raw.source_name}," then
+  state what happened, who was involved, where and when.
+— Sentence 2: Background — who is this person, company or institution.
+— Sentence 3: Specific details of the event — what exactly occurred.
+— Sentence 4: Immediate response — what happened next, reactions.
+— Sentence 5: Current status — where things stand right now.
+DO NOT summarise. Write every sentence in full.
 
 [WHY_IT_MATTERS]
-REQUIREMENT: Minimum 40 words. Write at least 3 sentences.
-- Why does this affect ordinary people.
-- Impact on technology, security, economy, or politics.
-- Connect to Pakistan, Middle East, or Asia where relevant.
+REQUIREMENT: Minimum 40 words. At least 3 sentences.
+— Explain the real-world impact on ordinary people.
+— Connect specifically to Pakistan, the Gulf region, or South Asia.
+  Use this exact format: "For Pakistan and the region, this means..."
+— State the broader global significance.
 
 [EXPERT_INSIGHT]
-REQUIREMENT: Minimum 40 words. Write at least 3 sentences.
-- What does this signal about the industry or world.
-- What should people expect in the next weeks or months.
-- Aria's authoritative professional take — not opinion, analysis.
+REQUIREMENT: Minimum 40 words. At least 3 sentences.
+— Report what analysts, experts, and observers are saying.
+— Use phrases like: "Analysts suggest...", "Experts warn...",
+  "According to observers...", "Policy experts note..."
+— Aria does NOT have personal opinions. She reports what others say.
+— What should people watch for in the coming days or weeks?
 
 [SIGN_OFF]
 REQUIREMENT: Use exactly these two lines:
 "{config.anchor.sign_off}"
 "This was {show.name} on MNN — Meridian News Network."
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FINAL CHECK BEFORE SUBMITTING:
-[ ] HOOK written
-[ ] OPEN written
-[ ] WHAT_HAPPENED written (60+ words)
-[ ] WHY_IT_MATTERS written (40+ words)
-[ ] EXPERT_INSIGHT written (40+ words)
-[ ] SIGN_OFF written
-[ ] Total word count: {word_target}+ words
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-RULES:
-- Never sensational. Never clickbait.
-- Always accurate to the source material.
-- Speak to everyone — student, investor, farmer.
-- British English spelling.
-- No emojis. No hashtags.
-- Never say "In conclusion" or "To summarise".
-- Maximum 20 words per sentence.
+STRICT STYLE RULES:
+— British English spelling throughout.
+— Maximum 20 words per sentence.
+— No jargon. No clickbait. No sensationalism.
+— Speak to everyone — student, investor, farmer, professional.
+— Never say "In conclusion" or "To summarise".
+— Never use graphic or distressing language.
+— For conflict stories: report casualties factually using passive
+  language — "lives were lost" not "people were killed".
+— For health stories: never cause alarm. Always note viewers should
+  consult medical professionals. Never give specific medical advice.
+— Total word count MUST be {word_target} words or more.
 """
 
 # ── Script parser ──────────────────────────────────────────
@@ -247,28 +240,25 @@ def write_script(
 
     prompt = build_prompt(story, show)
 
-    response = client.chat.completions.create(
-        model    = MODEL,
-        messages = [
-            {
-                "role":    "system",
-                "content": (
-                    "You are a senior broadcast journalist at "
-                    "Meridian News Network. You write clean, "
-                    "authoritative, globally inclusive scripts. "
-                    "Always follow the exact format requested."
-                )
-            },
-            {
-                "role":    "user",
-                "content": prompt
-            }
-        ],
-        temperature = 0.7,
-        max_tokens  = 1500,
-    )
-
-    raw_script = response.choices[0].message.content
+    raw_script = _call_groq_with_retry(
+            messages=[
+                {
+                    "role":    "system",
+                    "content": (
+                        "You are a senior broadcast journalist at "
+                        "Meridian News Network. You write clean, "
+                        "authoritative, globally inclusive scripts. "
+                        "Always follow the exact format requested."
+                    )
+                },
+                {
+                    "role":    "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens  = 2000,
+            temperature = 0.7,
+        )
     script     = parse_script(raw_script, story.raw.id, show)
 
     if script.word_count < 50:
@@ -323,14 +313,13 @@ Summary: {s.raw.summary[:300]}
     tone = tone_map.get(show.id, "Professional, balanced, and clear.")
 
     prompt = f"""
-You are the head scriptwriter for MERIDIAN NEWS NETWORK.
+You are a senior broadcast journalist at MERIDIAN NEWS NETWORK (MNN).
 Write a {show.name} script covering {len(stories)} stories.
 
 ANCHOR:    {config.anchor.name}
 OPEN WITH: "{anchor_open}"
 SIGN OFF:  "{config.anchor.sign_off}"
-TARGET:    {word_target} words ({show.video_duration} seconds)
-TONE:      {tone}
+TARGET:    {word_target} words minimum ({show.video_duration} seconds)
 
 {stories_text}
 
@@ -338,53 +327,57 @@ FORMAT:
 
 [HOOK]
 Single powerful opening line covering today's biggest theme.
+Maximum 15 words.
 
 [OPEN]
-"{anchor_open}"
+Use exactly: "{anchor_open}"
 
 [WHAT_HAPPENED]
-Cover each story in order. 2-3 sentences per story.
-Use "Meanwhile..." or "Also today..." to transition.
+Cover each story in order.
+— Begin each story with "According to [source name],"
+— 3-4 sentences per story.
+— Use "Meanwhile..." or "Also today..." to transition between stories.
 
 [WHY_IT_MATTERS]
-Overall significance of today's stories combined.
+Overall significance of today's stories.
+Include at least one connection to Pakistan, the Gulf, or South Asia:
+"For Pakistan and the region, this means..."
 3-4 sentences.
 
 [EXPERT_INSIGHT]
-One sharp observation connecting all stories.
-What is the bigger picture?
+What analysts and observers are saying about today's developments.
+Use: "Analysts suggest..." / "Experts warn..." / "Observers note..."
+Aria reports — she does not give personal opinions.
+2-3 sentences.
 
 [SIGN_OFF]
 "{config.anchor.sign_off}"
 "This was {show.name} on MNN — Meridian News Network."
 
 RULES:
-- Simple clear English. Anyone can understand.
-- British spelling.
-- No jargon. No clickbait.
-- Maximum 20 words per sentence.
+— {word_target} words minimum.
+— British spelling.
+— No jargon. No clickbait. No graphic language.
+— Maximum 20 words per sentence.
 """
 
-    response = client.chat.completions.create(
-        model    = MODEL,
-        messages = [
-            {
-                "role":    "system",
-                "content": (
-                    "You are a senior broadcast journalist at "
-                    "Meridian News Network."
-                )
-            },
-            {
-                "role":    "user",
-                "content": prompt
-            }
-        ],
-        temperature = 0.7,
-        max_tokens  = 2000,
-    )
-
-    raw_script = response.choices[0].message.content
+    raw_script = _call_groq_with_retry(
+            messages=[
+                {
+                    "role":    "system",
+                    "content": (
+                        "You are a senior broadcast journalist at "
+                        "Meridian News Network."
+                    )
+                },
+                {
+                    "role":    "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens  = 3000,
+            temperature = 0.7,
+        )
     script     = parse_script(
         raw_script,
         stories[0].raw.id,

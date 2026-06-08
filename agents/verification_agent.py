@@ -81,6 +81,21 @@ def compute_confidence(story: RawStory, cross_sources: List[str]) -> float:
     if any(l in story.title.lower() for l in low_interest):
         score -= 0.20
 
+    # 7. Penalise press release / sponsored content language
+    pr_phrases = [
+        "proud to announce", "pleased to announce",
+        "excited to announce", "delighted to announce",
+        "launches new", "introduces new", "unveils new",
+        "partnership with", "in partnership with",
+        "sponsored by", "paid partnership",
+        "press release", "for immediate release",
+    ]
+    if any(p in story.title.lower() or
+           p in story.summary.lower()
+           for p in pr_phrases):
+        score -= 0.30
+        logger.debug(f"PR content penalty applied: {story.title[:50]}")
+
     return min(round(score, 2), 1.0)
 
 

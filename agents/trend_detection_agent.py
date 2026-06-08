@@ -114,45 +114,48 @@ def scrape_hacker_news() -> List[RawStory]:
 
     return stories
 
-# ── Scraper 3: Reddit ──────────────────────────────────────
+# ── Scraper 3: Reddit (RSS — no auth required) ────────────
 def scrape_reddit() -> List[RawStory]:
     stories = []
-    subreddits = ["artificial", "cybersecurity", "MachineLearning",
-                  "netsec", "technology"]
-    headers = {"User-Agent": "ai-news-bot/1.0"}
+    subreddits = ["artificial", "MachineLearning", "technology",
+                  "worldnews", "geopolitics"]
 
     for sub in subreddits:
         try:
-            url  = f"https://www.reddit.com/r/{sub}/hot.json?limit=20"
-            resp = httpx.get(url, headers=headers, timeout=10)
-            data = resp.json()
-            posts = data["data"]["children"]
+            url  = f"https://www.reddit.com/r/{sub}/hot.rss?limit=20"
+            feed = feedparser.parse(url)
 
-            for post in posts:
-                p     = post["data"]
-                title = p.get("title", "")
-                link  = "https://reddit.com" + p.get("permalink", "")
-                score = float(p.get("score", 0))
-                text  = p.get("selftext", "")
+            for entry in feed.entries[:20]:
+                title   = entry.get("title", "")
+                link    = entry.get("link", "")
+                summary = entry.get("summary", title)
 
-                if not is_relevant(title + " " + text):
+                if not title or not link:
+                    continue
+                if not is_relevant(title + " " + summary):
                     continue
 
-                published = datetime.fromtimestamp(
-                    p.get("created_utc", 0), tz=timezone.utc
-                )
+                try:
+                    if hasattr(entry, "published_parsed") and entry.published_parsed:
+                        published = datetime(*entry.published_parsed[:6],
+                                             tzinfo=timezone.utc)
+                    else:
+                        published = datetime.now(timezone.utc)
+                except Exception:
+                    published = datetime.now(timezone.utc)
+
                 if not is_recent(published):
                     continue
 
                 stories.append(RawStory(
                     id           = make_id(link),
                     title        = title,
-                    summary      = text[:500] if text else title,
+                    summary      = summary[:500],
                     url          = link,
                     source       = SourceType.REDDIT,
                     source_name  = f"r/{sub}",
                     published_at = published,
-                    score        = score,
+                    score        = 40.0,
                     keywords     = [k for k in config.content.keywords
                                     if k.lower() in title.lower()],
                 ))
@@ -199,16 +202,6 @@ def scrape_mainstream_media() -> List[RawStory]:
         "DeepMind Blog":       "https://deepmind.google/blog/rss.xml",
         "Hugging Face Blog":   "https://huggingface.co/blog/feed.xml",
         "Towards Data Science":"https://towardsdatascience.com/feed",
-
-        # ── Cybersecurity ──────────────────────────────────────
-        "The Hacker News":     "https://feeds.feedburner.com/TheHackersNews",
-        "Krebs Security":      "https://krebsonsecurity.com/feed/",
-        "Bleeping Computer":   "https://www.bleepingcomputer.com/feed/",
-        "Dark Reading":        "https://www.darkreading.com/rss.xml",
-        "SecurityWeek":        "https://feeds.feedburner.com/Securityweek",
-        "Threatpost":          "https://threatpost.com/feed/",
-        "CISA Alerts":         "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-        "Naked Security":      "https://nakedsecurity.sophos.com/feed/",
 
         # ── Pakistan & South Asia ──────────────────────────────
         "Dawn Pakistan":       "https://www.dawn.com/feeds/home",
