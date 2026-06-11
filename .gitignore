@@ -5,3 +5,6 @@ __pycache__/
 output/
 *.mp4
 .venv/
+logs/
+config/youtube_oauth.json
+config/youtube_token.json

@@ -175,7 +175,7 @@ def run_broadcast(show_id: str) -> bool:
             video     = video,
             thumbnail = thumbnail,
         )
-        url              = run_uploader_agent(package, show)
+        url              = run_uploader_agent(package, show=show)
         package.youtube_url = url
 
         # ── Step 6: Save to DB ─────────────────────────────

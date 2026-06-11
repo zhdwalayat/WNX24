@@ -13,7 +13,8 @@ class APIConfig:
     newsapi_key: str = os.getenv("NEWSAPI_KEY", "")
     reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
     reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
-    youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")
+    youtube_api_key:    str = os.getenv("YOUTUBE_API_KEY", "")
+    youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
 
 @dataclass
 class ContentConfig:
@@ -163,11 +164,12 @@ class ShowConfig:
 
 @dataclass
 class ChannelConfig:
-    name:     str = "Meridian News Network"
-    tagline:  str = "Where the world meets."
-    handle:   str = "@MeridianNN"
-    language: str = "en"
-    category_id: str = "25"   # YouTube: News & Politics
+    name:               str = "Meridian News Network"
+    tagline:            str = "Where the world meets."
+    handle:             str = "@MeridianNN"
+    language:           str = "en"
+    category_id:        str = "25"   # YouTube: News & Politics
+    youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
 
 @dataclass
 class SchedulerConfig:
@@ -178,7 +180,7 @@ class SchedulerConfig:
             anchor_open="breaking", schedule_pkt=[],
             interval_minutes=30, lookback_minutes=30,
             video_duration=60, story_count=1,
-            min_score=200.0, is_breaking=True,
+            min_score=75.0, is_breaking=True,
         ),
 
         "morning": ShowConfig(

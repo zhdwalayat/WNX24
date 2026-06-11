@@ -240,6 +240,25 @@ RULES:
 — Total MUST be {word_target} words or more.
 """
 
+# ── Section label prefixes the LLM sometimes inserts ──────
+_SECTION_PREFIXES = (
+    "hook:", "open:", "what happened:", "what_happened:",
+    "why it matters:", "why_it_matters:", "expert insight:",
+    "expert_insight:", "sign off:", "sign_off:",
+    "the basics:", "the_basics:", "the big picture:", "the_big_picture:",
+)
+
+def _strip_label(text: str) -> str:
+    """Remove leading LLM-inserted section labels like 'Hook: ' from content."""
+    t = text.strip()
+    lower = t.lower()
+    for prefix in _SECTION_PREFIXES:
+        if lower.startswith(prefix):
+            t = t[len(prefix):].strip()
+            break
+    return t
+
+
 # ── Script parser ──────────────────────────────────────────
 def parse_script(raw: str, story_id: str,
                  show: ShowConfig) -> VideoScript:
@@ -258,44 +277,60 @@ def parse_script(raw: str, story_id: str,
         line = line.strip()
         if not line:
             continue
-        if   "[HOOK]"           in line: current = "hook"
-        elif "[OPEN]"           in line: current = "open"
-        elif "[WHAT_HAPPENED]"  in line: current = "what_happened"
-        elif "[WHY_IT_MATTERS]" in line: current = "why_it_matters"
-        elif "[EXPERT_INSIGHT]" in line: current = "expert_insight"
-        elif "[SIGN_OFF]"       in line: current = "sign_off"
-        elif current:
+        if   "[HOOK]"           in line: current = "hook";           continue
+        elif "[OPEN]"           in line: current = "open";           continue
+        elif "[WHAT_HAPPENED]"  in line: current = "what_happened";  continue
+        elif "[WHY_IT_MATTERS]" in line: current = "why_it_matters"; continue
+        elif "[EXPERT_INSIGHT]" in line: current = "expert_insight"; continue
+        elif "[SIGN_OFF]"       in line: current = "sign_off";       continue
+        elif "[THE_BASICS]"     in line: current = "what_happened";  continue
+        elif "[THE_BIG_PICTURE]"in line: current = "expert_insight"; continue
+        if current:
             sections[current] += line + " "
 
+    # Strip any "Hook:", "What Happened:" etc. labels the LLM added
+    for key in sections:
+        sections[key] = _strip_label(sections[key])
+
     # Build full script text for avatar TTS
-    full_text = " ".join([
+    full_text = " ".join(filter(None, [
         sections["hook"],
         sections["open"],
         sections["what_happened"],
         sections["why_it_matters"],
         sections["expert_insight"],
         sections["sign_off"],
-    ]).strip()
+    ])).strip()
 
     # ── Fallback: if section markers were ignored, use raw text directly ──
     if not full_text:
         logger.warning("parse_script: no section markers found — using raw text")
         full_text = raw.strip()
         lines     = [l.strip() for l in raw.splitlines() if l.strip()]
-        hook      = lines[0][:120] if lines else "Breaking News"
-        body      = " ".join(lines[1:]) if len(lines) > 1 else ""
+
+        # First non-empty line → hook (strip any label prefix)
+        hook = _strip_label(lines[0])[:120] if lines else "Breaking News"
+
+        # Split remaining lines roughly into thirds for the three body sections
+        body_lines = lines[1:] if len(lines) > 1 else []
+        n = len(body_lines)
+        third = max(1, n // 3)
+        what_happened  = " ".join(body_lines[:third])
+        why_it_matters = " ".join(body_lines[third:2*third])
+        expert_insight = " ".join(body_lines[2*third:])
+
         word_count    = len(full_text.split())
         duration_secs = int((word_count / config.content.words_per_minute) * 60)
         return VideoScript(
-            story_id      = story_id,
-            hook          = hook,
-            what_happened = body[:300],
-            why_it_matters= "",
-            expert_insight= "",
-            cta           = "",
-            full_text     = full_text,
-            word_count    = word_count,
-            duration_secs = duration_secs,
+            story_id       = story_id,
+            hook           = hook,
+            what_happened  = what_happened,
+            why_it_matters = why_it_matters,
+            expert_insight = expert_insight,
+            cta            = "",
+            full_text      = full_text,
+            word_count     = word_count,
+            duration_secs  = duration_secs,
         )
 
     word_count    = len(full_text.split())
@@ -303,11 +338,11 @@ def parse_script(raw: str, story_id: str,
 
     return VideoScript(
         story_id        = story_id,
-        hook            = sections["hook"].strip(),
-        what_happened   = sections["what_happened"].strip(),
-        why_it_matters  = sections["why_it_matters"].strip(),
-        expert_insight  = sections["expert_insight"].strip(),
-        cta             = sections["sign_off"].strip(),
+        hook            = sections["hook"],
+        what_happened   = sections["what_happened"],
+        why_it_matters  = sections["why_it_matters"],
+        expert_insight  = sections["expert_insight"],
+        cta             = sections["sign_off"],
         full_text       = full_text,
         word_count      = word_count,
         duration_secs   = duration_secs,
@@ -331,7 +366,13 @@ def write_script(
                         "You are a senior broadcast journalist at "
                         "Meridian News Network. You write clean, "
                         "authoritative, globally inclusive scripts. "
-                        "Always follow the exact format requested."
+                        "CRITICAL: You MUST output each section using "
+                        "the EXACT markers on their own line: "
+                        "[HOOK], [OPEN], [WHAT_HAPPENED], "
+                        "[WHY_IT_MATTERS], [EXPERT_INSIGHT], [SIGN_OFF]. "
+                        "Write the section content directly after the "
+                        "marker — do NOT add the marker name as a label "
+                        "before the content (do NOT write 'Hook: ...')."
                     )
                 },
                 {
@@ -456,7 +497,14 @@ RULES:
                     "role":    "system",
                     "content": (
                         "You are a senior broadcast journalist at "
-                        "Meridian News Network."
+                        "Meridian News Network. "
+                        "CRITICAL: You MUST output each section using "
+                        "the EXACT markers on their own line: "
+                        "[HOOK], [OPEN], [WHAT_HAPPENED], "
+                        "[WHY_IT_MATTERS], [EXPERT_INSIGHT], [SIGN_OFF]. "
+                        "Write content directly after each marker — "
+                        "do NOT add the marker name as a label "
+                        "before the content."
                     )
                 },
                 {

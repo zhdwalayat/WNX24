@@ -42,6 +42,26 @@ broadcast_history: List[Dict]     = []
 current_run:       Dict[str, Any] = {}
 is_running:        bool           = False
 
+# ── Broadcast deduplication ────────────────────────────────
+_HISTORY_FILE = Path("output/metadata/broadcast_history.json")
+
+def _load_broadcast_ids() -> set:
+    try:
+        if _HISTORY_FILE.exists():
+            return set(json.loads(_HISTORY_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+def _save_broadcast_ids(ids: set) -> None:
+    try:
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_FILE.write_text(json.dumps(list(ids), indent=2))
+    except Exception:
+        pass
+
+_broadcast_ids: set = _load_broadcast_ids()
+
 
 def _log(msg: str, status: str = "info"):
     entry = {
@@ -95,6 +115,13 @@ async def run_pipeline(show_id: str):
         fresh = [s for s in verified if s.status.value == "verified"]
         if not fresh:
             _log("No verified stories — aborting broadcast", "error")
+            is_running = False
+            return
+
+        # Filter out stories already broadcast (deduplication)
+        fresh = [s for s in fresh if s.raw.id not in _broadcast_ids]
+        if not fresh:
+            _log("All top stories already broadcast — no new content", "warning")
             is_running = False
             return
 
@@ -172,7 +199,7 @@ async def run_pipeline(show_id: str):
             story=top, script=script, video=video, thumbnail=thumbnail
         )
 
-        url = await loop.run_in_executor(None, run_uploader_agent, package)
+        url = await loop.run_in_executor(None, run_uploader_agent, package, show)
 
         if config.api.youtube_api_key:
             _log(f"         Uploaded — {url}", "success")
@@ -182,6 +209,11 @@ async def run_pipeline(show_id: str):
         current_run["youtube_url"] = url
         current_run["title"]       = package.title or script.hook
         current_run["completed_at"] = datetime.now().isoformat()
+
+        # Mark story as broadcast so it won't be re-uploaded
+        for s in fresh[:show.story_count]:
+            _broadcast_ids.add(s.raw.id)
+        _save_broadcast_ids(_broadcast_ids)
 
         _log("", "info")
         _log(f"BROADCAST COMPLETE — {show.name}", "success")

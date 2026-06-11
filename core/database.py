@@ -192,7 +192,7 @@ def save_broadcast(
 def get_stats() -> dict:
     conn  = get_conn()
     stats = {}
-    for status in ["verified", "broadcast", "rejected", "pending"]:
+    for status in ["new", "verified", "broadcast", "rejected", "pending"]:
         row = conn.execute(
             "SELECT COUNT(*) FROM stories WHERE status=?",
             (status,)

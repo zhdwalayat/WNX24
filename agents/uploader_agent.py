@@ -45,13 +45,18 @@ def build_metadata(package: VideoPackage, show: ShowConfig = None) -> dict:
     story  = package.story.raw
     script = package.script
 
-    # Title — SEO optimised
-    title = f"{script.hook[:60]} | Meridian News Network"
+    # Title — SEO optimised (strip any LLM-inserted "Hook:" prefix)
+    hook_text = script.hook
+    for prefix in ("hook:", "open:", "breaking:"):
+        if hook_text.lower().startswith(prefix):
+            hook_text = hook_text[len(prefix):].strip()
+            break
+    title = f"{hook_text[:60]} | Meridian News Network"
     if len(title) > 100:
         title = title[:97] + "..."
 
     # Description — structured for YouTube SEO
-    chapters = build_chapters(script, show) if show else ""
+    chapters = build_chapters(script, show)
 
     description = f"""{script.hook}
 
@@ -102,57 +107,110 @@ from Pakistan, the Middle East, Asia, and the World.
 
 # ── YouTube upload via API ─────────────────────────────────
 def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
-    """Upload video + thumbnail to YouTube. Returns video URL."""
-
     try:
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
-        import google.oauth2.credentials
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
 
-        # Load OAuth credentials from file
-        creds_path = os.getenv("YOUTUBE_CREDENTIALS_PATH", "config/youtube_credentials.json")
-        if not os.path.exists(creds_path):
-            logger.warning(f"YouTube credentials not found at {creds_path} — mock upload")
-            return _mock_upload(package, metadata)
+    except ImportError as _ie:
+        logger.error(f"Google API import failed: {_ie}")
+        return _mock_upload(package, metadata)
 
-        with open(creds_path) as f:
-            creds_data = json.load(f)
+    SCOPES     = ["https://www.googleapis.com/auth/youtube.upload",
+                  "https://www.googleapis.com/auth/youtube"]
+    TOKEN_FILE = "config/youtube_token.json"
+    OAUTH_FILE = "config/youtube_oauth.json"
+    video_path = package.video.local_path
 
-        credentials = google.oauth2.credentials.Credentials(
-            token         = creds_data.get("token"),
-            refresh_token = creds_data.get("refresh_token"),
-            token_uri     = creds_data.get("token_uri"),
-            client_id     = creds_data.get("client_id"),
-            client_secret = creds_data.get("client_secret"),
+    if not video_path or not os.path.exists(video_path):
+        logger.warning(f"Video file not found: {video_path} — using mock")
+        return _mock_upload(package, metadata)
+
+    # ── Load or refresh credentials ────────────────────────
+    creds = None
+
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE, "r") as f:
+                import json as _json
+                token_data = _json.load(f)
+                creds = Credentials.from_authorized_user_info(
+                    token_data, SCOPES
+                )
+        except Exception as e:
+            logger.warning(f"Could not load token: {e}")
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                logger.info("YouTube token refreshed")
+            except Exception as e:
+                logger.warning(f"Token refresh failed: {e}")
+                creds = None
+
+        if not creds:
+            if not os.path.exists(OAUTH_FILE):
+                logger.error(
+                    f"OAuth client secrets not found: {OAUTH_FILE} — "
+                    "download from Google Cloud Console and save as config/youtube_oauth.json"
+                )
+                return _mock_upload(package, metadata)
+            logger.info("Opening browser for YouTube authorisation...")
+            flow = InstalledAppFlow.from_client_secrets_file(
+                OAUTH_FILE, SCOPES
+            )
+            creds = flow.run_local_server(
+                port            = 0,
+                open_browser    = True,
+                success_message = (
+                    "MNN authorised successfully. "
+                    "You can close this tab."
+                )
+            )
+
+        # Save refreshed/new token for future runs
+        try:
+            with open(TOKEN_FILE, "w") as f:
+                import json as _json
+                _json.dump(_json.loads(creds.to_json()), f, indent=2)
+            logger.info(f"YouTube token saved — {TOKEN_FILE}")
+        except Exception as e:
+            logger.warning(f"Could not save token: {e}")
+
+    try:
+        # ── Build YouTube service ──────────────────────────────
+        youtube = build("youtube", "v3", credentials=creds)
+
+        # ── Upload video ───────────────────────────────────────
+        body = {
+            "snippet": {
+                "title":       metadata["title"],
+                "description": metadata["description"],
+                "tags":        metadata["tags"],
+                "categoryId":  metadata["categoryId"],
+            },
+            "status": {
+                "privacyStatus":           metadata["privacyStatus"],
+                "selfDeclaredMadeForKids": False,
+            }
+        }
+
+        media = MediaFileUpload(
+            video_path,
+            mimetype  = "video/mp4",
+            resumable = True,
+            chunksize = 1024 * 1024 * 5,   # 5 MB chunks
         )
 
-        youtube = build("youtube", "v3", credentials=credentials)
-        meta    = metadata
+        logger.info(f"Uploading to YouTube: {metadata['title'][:60]}")
 
-        # ── Upload video ───────────────────────────────────
-        logger.info(f"Uploading video: {meta['title']}")
-
-        request = youtube.videos().insert(
-            part = "snippet,status",
-            body = {
-                "snippet": {
-                    "title":           meta["title"],
-                    "description":     meta["description"],
-                    "tags":            meta["tags"],
-                    "categoryId":      meta["categoryId"],
-                    "defaultLanguage": meta["defaultLanguage"],
-                },
-                "status": {
-                    "privacyStatus":  meta["privacyStatus"],
-                    "selfDeclaredMadeForKids": False,
-                },
-            },
-            media_body = MediaFileUpload(
-                package.video.local_path,
-                chunksize  = 1024 * 1024,   # 1 MB chunks
-                resumable  = True,
-                mimetype   = "video/mp4",
-            ),
+        request  = youtube.videos().insert(
+            part       = "snippet,status",
+            body       = body,
+            media_body = media,
         )
 
         response = None
@@ -163,20 +221,21 @@ def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
                 logger.info(f"Upload progress: {pct}%")
 
         video_id  = response["id"]
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        logger.info(f"Video uploaded — {video_url}")
+        video_url = f"https://youtube.com/watch?v={video_id}"
+        logger.info(f"Upload complete — {video_url}")
 
-        # ── Upload thumbnail ───────────────────────────────
-        if package.thumbnail and package.thumbnail.image_path:
+        # ── Set thumbnail ──────────────────────────────────────
+        thumb_path = package.thumbnail.image_path
+        if thumb_path and os.path.exists(thumb_path):
             try:
                 youtube.thumbnails().set(
                     videoId    = video_id,
                     media_body = MediaFileUpload(
-                        package.thumbnail.image_path,
-                        mimetype = "image/jpeg",
+                        thumb_path,
+                        mimetype = "image/jpeg"
                     ),
                 ).execute()
-                logger.info("Thumbnail uploaded")
+                logger.info(f"Thumbnail uploaded for {video_id}")
             except Exception as e:
                 logger.warning(f"Thumbnail upload failed: {e}")
 
