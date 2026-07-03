@@ -1,5 +1,5 @@
 """
-dashboard/app.py — Meridian News Network Control Room
+dashboard/app.py — WNX24 Control Room
 Interactive dashboard with live pipeline execution.
 
 Run:  uvicorn dashboard.app:app --reload --port 8000
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import config
 
-app = FastAPI(title="MNN — Meridian News Network Control Room")
+app = FastAPI(title="WNX24 Control Room")
 
 # ── Static files & templates ───────────────────────────────
 BASE      = Path(os.path.dirname(os.path.abspath(__file__)))

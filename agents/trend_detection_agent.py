@@ -223,10 +223,61 @@ def scrape_reddit() -> List[RawStory]:
     logger.info(f"Reddit: {len(stories)} stories found")
     return stories
 
-# ── Scraper 4: Mainstream Media RSS ───────────────────────
-def scrape_mainstream_media() -> List[RawStory]:
+# ── Generic RSS feed scraper ──────────────────────────────
+def scrape_rss_feeds(feeds: dict) -> List[RawStory]:
+    """Scrape an arbitrary {source_name: feed_url} dict of RSS feeds."""
     stories = []
 
+    for source_name, feed_url in feeds.items():
+        try:
+            resp  = httpx.get(feed_url, timeout=10, follow_redirects=True)
+            feed  = feedparser.parse(resp.content)
+            score = get_rss_score(source_name)
+            count = 0
+
+            for entry in feed.entries[:15]:
+                title   = entry.get("title", "")
+                summary = entry.get("summary", title)
+                link    = entry.get("link", "")
+                if not title or not link:
+                    continue
+                if not is_relevant(title + " " + summary, source_name):
+                    continue
+                try:
+                    published = datetime(
+                        *entry.published_parsed[:6], tzinfo=timezone.utc
+                    ) if hasattr(entry, "published_parsed") \
+                      and entry.published_parsed \
+                      else datetime.now(timezone.utc)
+                except Exception:
+                    published = datetime.now(timezone.utc)
+                if not is_recent(published):
+                    continue
+
+                stories.append(RawStory(
+                    id           = make_id(link),
+                    title        = title,
+                    summary      = summary[:500],
+                    url          = link,
+                    source       = SourceType.RSS,
+                    source_name  = source_name,
+                    published_at = published,
+                    score        = score,
+                    keywords     = [k for k in config.content.keywords
+                                    if k.lower() in title.lower()],
+                ))
+                count += 1
+
+            if count:
+                logger.info(f"  {source_name}: {count} stories")
+        except Exception as e:
+            logger.warning(f"  {source_name} feed failed: {e}")
+
+    return stories
+
+
+# ── Scraper 4: Mainstream Media RSS ───────────────────────
+def scrape_mainstream_media() -> List[RawStory]:
     feeds = {
         # ── World News (top priority — these lead the bulletin) ──
         "AP News":              "https://feeds.apnews.com/rss/TopNews",
@@ -289,6 +340,12 @@ def scrape_mainstream_media() -> List[RawStory]:
         "Tribune Pakistan":     "https://tribune.com.pk/feed/",
         "Economic Times Tech":  "https://economictimes.indiatimes.com/tech/rss",
 
+        # ── Pakistan Media ──────────────────────────────────────────
+        "Geo News":             "https://www.geo.tv/rss/1",
+        "ARY News":             "https://arynews.tv/feed/",
+        "Samaa News":           "https://www.samaa.tv/feed/",
+        "APP News":             "https://www.app.com.pk/feed/",
+
         # ── Middle East & Asia ────────────────────────────────────
         "South China Morning Post": "https://www.scmp.com/rss/91/feed",
         "Nikkei Asia":          "https://asia.nikkei.com/rss/feed/nar",
@@ -296,52 +353,24 @@ def scrape_mainstream_media() -> List[RawStory]:
         "Japan Times":          "https://www.japantimes.co.jp/feed/",
         "Caixin Global":        "https://www.caixinglobal.com/rss/",
         "MENAFN":               "https://menafn.com/rss/rss.aspx",
+
+        # ── American World Impact ───────────────────────────────────
+        "CNN World":            "http://rss.cnn.com/rss/edition_world.rss",
+        "Washington Post":      "https://feeds.washingtonpost.com/rss/world",
+        "NPR World":            "https://feeds.npr.org/1004/rss.xml",
+        "ABC News World":       "https://abcnews.go.com/abcnews/internationalheadlines",
+
+        # ── Chinese Media ────────────────────────────────────────────
+        "CGTN":                 "https://www.cgtn.com/subscribe/rss/section/world.xml",
+        "China Daily":          "https://www.chinadaily.com.cn/rss/world_rss.xml",
+
+        # ── Additional Global ─────────────────────────────────────────
+        "TRT World":            "https://www.trtworld.com/rss",
+        "NHK World":            "https://www3.nhk.or.jp/rss/news/cat0.xml",
+        "The Hindu":            "https://www.thehindu.com/feeder/default.rss",
     }
 
-    for source_name, feed_url in feeds.items():
-        try:
-            feed  = feedparser.parse(feed_url)
-            score = get_rss_score(source_name)
-            count = 0
-
-            for entry in feed.entries[:15]:
-                title   = entry.get("title", "")
-                summary = entry.get("summary", title)
-                link    = entry.get("link", "")
-                if not title or not link:
-                    continue
-                if not is_relevant(title + " " + summary, source_name):
-                    continue
-                try:
-                    published = datetime(
-                        *entry.published_parsed[:6], tzinfo=timezone.utc
-                    ) if hasattr(entry, "published_parsed") \
-                      and entry.published_parsed \
-                      else datetime.now(timezone.utc)
-                except Exception:
-                    published = datetime.now(timezone.utc)
-                if not is_recent(published):
-                    continue
-
-                stories.append(RawStory(
-                    id           = make_id(link),
-                    title        = title,
-                    summary      = summary[:500],
-                    url          = link,
-                    source       = SourceType.RSS,
-                    source_name  = source_name,
-                    published_at = published,
-                    score        = score,
-                    keywords     = [k for k in config.content.keywords
-                                    if k.lower() in title.lower()],
-                ))
-                count += 1
-
-            if count:
-                logger.info(f"  {source_name}: {count} stories")
-        except Exception as e:
-            logger.warning(f"  {source_name} feed failed: {e}")
-
+    stories = scrape_rss_feeds(feeds)
     logger.info(f"Mainstream Media: {len(stories)} total stories")
     return stories
 

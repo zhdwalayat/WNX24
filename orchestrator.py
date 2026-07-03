@@ -59,8 +59,20 @@ def _get_sources_for_focus(focus: str) -> List[str]:
         "science":  config.content.science_sources,
         "health":   config.content.health_sources,
         "conflict": config.content.conflict_sources,
+        "pakistan": config.content.pakistan_sources,
     }
     return source_map.get(focus, [])
+
+# ── Tiered minimum-score check ─────────────────────────────
+def _passes_min_score(show, story) -> bool:
+    """Apply show.min_score, with a stricter floor (min_score_tier3)
+    for Tier 3 sources if one is configured."""
+    threshold = show.min_score
+    if show.min_score_tier3 is not None:
+        from agents.verification_agent import TIER_3_SOURCES
+        if story.raw.source_name in TIER_3_SOURCES:
+            threshold = show.min_score_tier3
+    return story.raw.score >= threshold
 
 # ── Single broadcast ───────────────────────────────────────
 def run_broadcast(show_id: str) -> bool:
@@ -71,13 +83,13 @@ def run_broadcast(show_id: str) -> bool:
 
     logger.info("")
     logger.info("=" * 52)
-    logger.info(f"  MNN — {show.name.upper()}")
+    logger.info(f"  WNX24 — {show.name.upper()}")
     logger.info(f"  {datetime.now(PKT).strftime('%d %b %Y  |  %H:%M PKT')}")
     logger.info("=" * 52)
 
     try:
         # ── Step 1: Read from DB ───────────────────────────
-        logger.info("[1/6] Reading stories from MNN database...")
+        logger.info("[1/6] Reading stories from WNX24 database...")
 
         source_names = None
         if show.regional_focus != "global":
@@ -124,10 +136,10 @@ def run_broadcast(show_id: str) -> bool:
             f"Using top {min(len(fresh), show.story_count)}"
         )
 
-        # Apply min score filter
+        # Apply min score filter (Tier 3 sources need a higher bar)
         scored = [
             s for s in fresh
-            if s.raw.score >= show.min_score
+            if _passes_min_score(show, s)
         ]
         if scored:
             fresh = scored
@@ -208,7 +220,7 @@ def run_broadcast(show_id: str) -> bool:
 # ── Breaking news check ────────────────────────────────────
 def check_breaking_news():
     show   = config.scheduler.shows["breaking"]
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=60)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
     logger.info("Checking for breaking news...")
 
     try:
@@ -220,7 +232,7 @@ def check_breaking_news():
 
         breaking = [
             s for s in fresh
-            if s.raw.score >= show.min_score
+            if _passes_min_score(show, s)
             and s.raw.id not in broadcast_history
             and (
                 s.raw.published_at.replace(tzinfo=timezone.utc)
@@ -240,6 +252,22 @@ def check_breaking_news():
 
     except Exception as e:
         logger.exception(f"Breaking news check failed: {e}")
+
+# ── YouTube video cleanup ───────────────────────────────────
+def run_cleanup():
+    """Delete old YouTube videos on schedule."""
+    logger.info("Running YouTube video cleanup...")
+    from agents.uploader_agent import cleanup_old_videos
+    deleted = cleanup_old_videos(days_to_keep=3)
+    logger.info(f"Cleanup done — {deleted} videos removed")
+
+# ── Monthly database cleanup ────────────────────────────────
+def run_db_cleanup():
+    """Delete old story records on a monthly schedule."""
+    logger.info("Running monthly database cleanup...")
+    from core.database import cleanup_old_stories
+    deleted = cleanup_old_stories(days=30)
+    logger.info(f"DB cleanup done — {deleted} stories removed")
 
 # ── Setup APScheduler ──────────────────────────────────────
 def setup_scheduler() -> BlockingScheduler:
@@ -273,6 +301,8 @@ def setup_scheduler() -> BlockingScheduler:
                     f"{hour:02d}:00 PKT (Mon-Sat)"
                 )
             else:
+                job_id = (show_id if len(show.schedule_pkt) == 1
+                          else f"{show_id}_{hour}")
                 scheduler.add_job(
                     run_broadcast,
                     CronTrigger(
@@ -281,7 +311,7 @@ def setup_scheduler() -> BlockingScheduler:
                         timezone = PKT,
                     ),
                     kwargs        = {"show_id": show_id},
-                    id            = show_id,
+                    id            = job_id,
                     name          = show.name,
                     max_instances = 1,
                     coalesce      = True,
@@ -302,19 +332,19 @@ def setup_scheduler() -> BlockingScheduler:
         ),
         kwargs        = {"show_id": "week_review"},
         id            = "week_review",
-        name          = "MNN Week in Review",
+        name          = "WNX24 Week in Review",
         max_instances = 1,
         coalesce      = True,
     )
     logger.info(
-        f"Scheduled: MNN Week in Review              "
+        f"Scheduled: WNX24 Week in Review               "
         f"20:00 PKT (Sunday)"
     )
 
-    # Breaking news — every 30 minutes
+    # Breaking news — every 5 minutes
     scheduler.add_job(
         check_breaking_news,
-        IntervalTrigger(minutes=30, timezone=PKT),
+        IntervalTrigger(minutes=5, timezone=PKT),
         id            = "breaking_check",
         name          = "Breaking News Check",
         max_instances = 1,
@@ -322,8 +352,39 @@ def setup_scheduler() -> BlockingScheduler:
     )
     logger.info(
         "Scheduled: Breaking News Check              "
-        "every 30 minutes"
+        "every 5 minutes"
     )
+
+    # YouTube cleanup — daily during quiet hours
+    scheduler.add_job(
+        run_cleanup,
+        CronTrigger(
+            hour     = 3,
+            minute   = 0,
+            timezone = PKT,
+        ),
+        id            = "daily_cleanup",
+        name          = "YouTube Video Cleanup",
+        max_instances = 1,
+        coalesce      = True,
+    )
+    logger.info("Scheduled: YouTube Cleanup — 03:00 PKT daily")
+
+    # Monthly DB cleanup — 1st of every month at 02:00 PKT
+    scheduler.add_job(
+        run_db_cleanup,
+        CronTrigger(
+            day      = 1,
+            hour     = 2,
+            minute   = 0,
+            timezone = PKT,
+        ),
+        id            = "monthly_db_cleanup",
+        name          = "Monthly DB Cleanup",
+        max_instances = 1,
+        coalesce      = True,
+    )
+    logger.info("Scheduled: DB Cleanup — 1st of month 02:00 PKT")
 
     return scheduler
 
@@ -339,8 +400,8 @@ def start_24_7():
 
     logger.info("")
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║    MNN — MERIDIAN NEWS NETWORK — GOING LIVE  ║")
-    logger.info("║         24/7 Broadcast Scheduler             ║")
+    logger.info("║              WNX24 — GOING LIVE              ║")
+    logger.info("║           24/7 Broadcast Scheduler           ║")
     logger.info("╚══════════════════════════════════════════════╝")
     logger.info("")
 
@@ -357,7 +418,7 @@ def start_24_7():
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("MNN scheduler stopped.")
+        logger.info("WNX24 scheduler stopped.")
         scheduler.shutdown()
 
 if __name__ == "__main__":

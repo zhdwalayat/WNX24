@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,7 +19,7 @@ class APIConfig:
 @dataclass
 class ContentConfig:
     niche:                str   = "Global News — AI, Technology, Cybersecurity & World Affairs"
-    min_confidence_score: float = 0.7
+    min_confidence_score: float = 0.75  # was 0.70
     words_per_minute:     int   = 150
     lookback_hours:       int   = 24
 
@@ -65,6 +65,19 @@ class ContentConfig:
         "nuclear", "troops", "invasion", "occupation",
         "humanitarian crisis", "refugee", "ceasefire",
         "peacekeeping", "NATO", "defence", "weapons",
+
+        # ── Pakistan ──────────────────────────────────────────────
+        "Pakistan", "Islamabad", "Karachi", "Lahore",
+        "Rawalpindi", "Peshawar", "Quetta",
+        "Prime Minister Pakistan", "Pakistan Army",
+        "COAS", "Supreme Court Pakistan",
+        "Pakistan floods", "Pakistan earthquake",
+        "IMF Pakistan", "Pakistani rupee",
+        "PTI", "PMLN", "PPP", "Pakistan government",
+        "Pakistan economy", "State Bank Pakistan",
+        "CPEC", "China Pakistan", "Pakistan India",
+        "Line of Control", "KPK", "Balochistan",
+        "Sindh", "Punjab Pakistan",
     ])
 
     excluded_keywords: List[str] = field(default_factory=lambda: [
@@ -119,6 +132,13 @@ class ContentConfig:
         "Jane's", "Associated Press", "AFP",
     ])
 
+    pakistan_sources: List[str] = field(default_factory=lambda: [
+        "Geo News", "ARY News", "Samaa News",
+        "Dawn Pakistan", "Dawn", "The News",
+        "Express Tribune", "Tribune Pakistan",
+        "APP News",
+    ])
+
 @dataclass
 class AnchorConfig:
     name: str = "Aria"
@@ -126,26 +146,27 @@ class AnchorConfig:
         "calm, authoritative, globally inclusive — "
         "trusted by audiences from Karachi to Tokyo"
     )
-    sign_off: str = "Stay informed. Stay ahead. This is MNN."
+    sign_off: str = "Stay informed. Stay ahead. This is WNX24."
     opens: Dict[str, str] = field(default_factory=lambda: {
-        "breaking":     "Breaking news on MNN.",
-        "morning":      "Good morning. This is MNN.",
-        "world_affairs":"Welcome to World Affairs on Meridian.",
-        "asia":         "From across Asia, this is Meridian's Asia Tech Report.",
-        "economy":      "Markets are moving. This is Meridian Markets & Economy.",
-        "midday":       "Midday on MNN.",
-        "deep_dive":    "Time for a deeper look. This is Meridian Deep Dive.",
-        "science":      "Exploring our world. This is Meridian Science & Climate Watch.",
-        "mideast":      "From the Middle East and South Asia, this is Meridian.",
-        "health":       "Your health matters. This is Meridian Health & Medicine.",
-        "evening":      "Good evening. This is MNN.",
-        "cybersecurity":"Cyber threats are evolving. This is Meridian Cybersecurity Watch.",
-        "conflict":     "From conflict zones around the world, this is Meridian.",
-        "primetime":    "Prime time on MNN.",
-        "summary":      "Here is your complete daily summary from MNN.",
-        "explainer":    "Welcome to MNN Explainer. I'm Aria. Today we break down one story simply.",
-        "week_review":  "Good evening. I'm Aria. This is the MNN Week in Review.",
-        "default":      "This is MNN.",
+        "breaking":     "Breaking news on WNX24.",
+        "morning":      "Good morning. This is WNX24.",
+        "world_affairs":"Welcome to World Affairs on WNX24.",
+        "asia":         "From across Asia, this is WNX24's Asia Tech Report.",
+        "economy":      "Markets are moving. This is WNX24 Markets & Economy.",
+        "midday":       "Midday on WNX24.",
+        "deep_dive":    "Time for a deeper look. This is WNX24 Deep Dive.",
+        "science":      "Exploring our world. This is WNX24 Science & Climate Watch.",
+        "mideast":      "From the Middle East and South Asia, this is WNX24.",
+        "pakistan":     "From the Pakistan desk, this is WNX24. I'm Aria.",
+        "health":       "Your health matters. This is WNX24 Health & Medicine.",
+        "evening":      "Good evening. This is WNX24.",
+        "cybersecurity":"Cyber threats are evolving. This is WNX24 Cybersecurity Watch.",
+        "conflict":     "From conflict zones around the world, this is WNX24.",
+        "primetime":    "Prime time on WNX24.",
+        "summary":      "Here is your complete daily summary from WNX24.",
+        "explainer":    "Welcome to WNX24 Explainer. I'm Aria. Today we break down one story simply.",
+        "week_review":  "Good evening. I'm Aria. This is the WNX24 Week in Review.",
+        "default":      "This is WNX24.",
     })
 
 @dataclass
@@ -161,15 +182,21 @@ class ShowConfig:
     is_breaking:        bool = False
     regional_focus:     str  = "global"
     min_score:          float = 0.0
+    min_score_tier3:    Optional[float] = None  # stricter floor for Tier 3 sources
 
 @dataclass
 class ChannelConfig:
-    name:               str = "Meridian News Network"
-    tagline:            str = "Where the world meets."
-    handle:             str = "@MeridianNN"
+    name:               str = "WNX24"
+    tagline:            str = "World News. Always."
+    handle:             str = "@WNX24"
     language:           str = "en"
     category_id:        str = "25"   # YouTube: News & Politics
     youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
+    # Observed: channel hit YouTube's uploadLimitExceeded after ~10
+    # real uploads within an hour. Conservative default — raise via
+    # env var once the channel's actual limit is confirmed (e.g. after
+    # phone verification or as the channel ages).
+    max_daily_uploads:  int = int(os.getenv("YOUTUBE_MAX_DAILY_UPLOADS", "10"))
 
 @dataclass
 class SchedulerConfig:
@@ -180,7 +207,7 @@ class SchedulerConfig:
             anchor_open="breaking", schedule_pkt=[],
             interval_minutes=30, lookback_minutes=30,
             video_duration=60, story_count=1,
-            min_score=75.0, is_breaking=True,
+            min_score=50.0, min_score_tier3=75.0, is_breaking=True,
         ),
 
         "morning": ShowConfig(
@@ -193,7 +220,7 @@ class SchedulerConfig:
 
         "explainer": ShowConfig(
             id               = "explainer",
-            name             = "MNN Explainer",
+            name             = "WNX24 Explainer",
             anchor_open      = "explainer",
             schedule_pkt     = [8],
             interval_minutes = 1440,
@@ -201,6 +228,19 @@ class SchedulerConfig:
             video_duration   = 150,
             story_count      = 1,
             min_score        = 25.0,
+        ),
+
+        "pakistan": ShowConfig(
+            id               = "pakistan",
+            name             = "Pakistan Report",
+            anchor_open      = "pakistan",
+            schedule_pkt     = [8, 14, 20],
+            interval_minutes = 480,
+            lookback_minutes = 480,
+            video_duration   = 180,
+            story_count      = 3,
+            min_score        = 20.0,
+            regional_focus   = "pakistan",
         ),
 
         "world_affairs": ShowConfig(
@@ -301,7 +341,7 @@ class SchedulerConfig:
 
         "week_review": ShowConfig(
             id               = "week_review",
-            name             = "MNN Week in Review",
+            name             = "WNX24 Week in Review",
             anchor_open      = "week_review",
             schedule_pkt     = [20],
             interval_minutes = 10080,

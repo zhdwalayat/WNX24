@@ -2,12 +2,12 @@
 import sqlite3
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from loguru import logger
 from core.models import RawStory, VerifiedStory, SourceType, VerificationStatus
 
-DB_PATH = os.path.join("output", "mnn_news.db")
+DB_PATH = os.path.join("output", "wnx24_news.db")
 
 # ── Connect ────────────────────────────────────────────────
 def get_conn() -> sqlite3.Connection:
@@ -188,6 +188,19 @@ def save_broadcast(
     conn.commit()
     conn.close()
 
+# ── Count real (non-mock) YouTube uploads in the trailing window ──
+def count_real_uploads(hours: int = 24) -> int:
+    conn   = get_conn()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    row = conn.execute("""
+        SELECT COUNT(*) FROM broadcasts
+        WHERE broadcast_at >= ?
+        AND youtube_url NOT LIKE '%MOCK%'
+        AND youtube_url != ''
+    """, (cutoff,)).fetchone()
+    conn.close()
+    return row[0]
+
 # ── Get DB stats ───────────────────────────────────────────
 def get_stats() -> dict:
     conn  = get_conn()
@@ -203,6 +216,32 @@ def get_stats() -> dict:
     ).fetchone()[0]
     conn.close()
     return stats
+
+# ── Cleanup old DB records ─────────────────────────────────
+def cleanup_old_stories(days: int = 30) -> int:
+    """
+    Delete stories older than N days from DB.
+    Keeps DB lean and fast.
+    Run monthly.
+    """
+    conn   = get_conn()
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+
+    result = conn.execute("""
+        DELETE FROM stories
+        WHERE published_at < ?
+        AND status IN ('broadcast', 'rejected')
+    """, (cutoff,))
+
+    deleted = result.rowcount
+    conn.commit()
+    conn.close()
+    logger.info(
+        f"DB cleanup: {deleted} old stories removed"
+    )
+    return deleted
 
 # ── Row converter ──────────────────────────────────────────
 def _row_to_verified(row: sqlite3.Row) -> VerifiedStory:

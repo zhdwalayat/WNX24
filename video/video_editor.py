@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -35,7 +36,13 @@ TICKER_COLOUR = (255, 200,  40)  # gold headline
 
 INTRO_DURATION = 3.0
 OUTRO_DURATION = 4.0
-TICKER_SPEED   = 110   # px/sec scroll speed
+INTRO_PATH = ASSETS_DIR / "intro.mp4"
+OUTRO_PATH = ASSETS_DIR / "outro.mp4"
+TICKER_SPEED   = 90    # px/sec scroll speed
+TICKER_LOGO    = str(ASSETS_DIR / "WNX24_icon.png")
+
+TICKER_FALLBACK = "►  WNX24 — World News Express 24  ●  World News. Always."
+_TICKER_STRIP_RE = re.compile(r"[%\\\r\n\t]")
 
 # ── Script section -> scene mapping ────────────────────────
 SECTION_ORDER  = ["hook", "what_happened", "why_it_matters", "expert_insight", "cta"]
@@ -56,6 +63,13 @@ SECTION_TEXT = {
 
 
 # ── FFmpeg helpers ──────────────────────────────────────────
+def ensure_assets() -> None:
+    if not INTRO_PATH.exists():
+        logger.warning("assets/intro.mp4 not found")
+    else:
+        logger.info("WNX24 intro found — ready to use")
+
+
 def ffmpeg_available() -> bool:
     """Return True if the bundled FFmpeg binary can be executed."""
     try:
@@ -114,13 +128,8 @@ def _centred_x(draw: "ImageDraw.ImageDraw", text: str, font) -> int:
 
 def _draw_branding(draw: "ImageDraw.ImageDraw") -> None:
     font = _font(FONT_BOLD, 36)
-    draw.text((50, 30), "MERIDIAN NEWS NETWORK", fill=TICKER_COLOUR, font=font)
+    draw.text((50, 30), "WNX24", fill=TICKER_COLOUR, font=font)
     draw.line([(50, 84), (FRAME_W - 50, 84)], fill=ACCENT_COLOUR, width=4)
-
-
-def _draw_ticker_bar(draw: "ImageDraw.ImageDraw") -> None:
-    bar_h = 60
-    draw.rectangle([0, FRAME_H - bar_h, FRAME_W, FRAME_H], fill=ACCENT_COLOUR)
 
 
 def _draw_label_badge(draw: "ImageDraw.ImageDraw", label: str) -> None:
@@ -139,15 +148,13 @@ def _build_hook_frame(headline: str) -> "Image.Image":
     _draw_label_badge(draw, SECTION_LABELS["hook"])
 
     font  = _font(FONT_BOLD, 56)
-    lines = _wrap_lines(headline or "Breaking News from MNN", width=22, max_lines=4)
+    lines = _wrap_lines(headline or "Breaking News from WNX24", width=22, max_lines=4)
     line_h  = 76
     total_h = len(lines) * line_h
     y = (FRAME_H - 162 - total_h) // 2 + 162
     for line in lines:
         draw.text((_centred_x(draw, line, font), y), line, fill=TEXT_COLOUR, font=font)
         y += line_h
-
-    _draw_ticker_bar(draw)
     return img
 
 
@@ -172,7 +179,6 @@ def _build_section_frame(section: str, headline: str, body: str) -> "Image.Image
         draw.text((50, y), line, fill=TEXT_COLOUR, font=body_font)
         y += line_h
 
-    _draw_ticker_bar(draw)
     return img
 
 
@@ -181,10 +187,10 @@ def _build_intro_frame(headline: str) -> "Image.Image":
     draw = ImageDraw.Draw(img)
 
     logo_font = _font(FONT_BOLD, 100)
-    draw.text((_centred_x(draw, "MNN", logo_font), 130), "MNN", fill=TICKER_COLOUR, font=logo_font)
+    draw.text((_centred_x(draw, "WNX24", logo_font), 130), "WNX24", fill=TICKER_COLOUR, font=logo_font)
 
     sub_font = _font(FONT_BOLD, 34)
-    sub = "MERIDIAN NEWS NETWORK"
+    sub = "WORLD NEWS EXPRESS 24"
     draw.text((_centred_x(draw, sub, sub_font), 270), sub, fill=TEXT_COLOUR, font=sub_font)
 
     draw.line([(FRAME_W // 2 - 220, 330), (FRAME_W // 2 + 220, 330)], fill=ACCENT_COLOUR, width=4)
@@ -199,7 +205,6 @@ def _build_intro_frame(headline: str) -> "Image.Image":
     for i, line in enumerate(_wrap_lines(headline, width=52, max_lines=2)):
         draw.text((_centred_x(draw, line, head_font), 440 + i * 38), line, fill=TEXT_COLOUR, font=head_font)
 
-    _draw_ticker_bar(draw)
     return img
 
 
@@ -221,7 +226,6 @@ def _build_outro_frame(sign_off: str) -> "Image.Image":
     handle = f"{config.channel.handle}  —  {config.channel.tagline}"
     draw.text((_centred_x(draw, handle, handle_font), y + 20), handle, fill=ACCENT_COLOUR, font=handle_font)
 
-    _draw_ticker_bar(draw)
     return img
 
 
@@ -262,20 +266,127 @@ def _concat_clips(clip_paths: List[str], out_path: str, tmp_dir: str) -> None:
     ])
 
 
+def _concat_segments(video_path: str, out_path: str, tmp_dir: str) -> None:
+    """Prepend assets/intro.mp4 (and optional assets/outro.mp4) around the main video."""
+    if not INTRO_PATH.exists():
+        import shutil as _shutil
+        _shutil.copy2(video_path, out_path)
+        return
+
+    segments = [str(INTRO_PATH), video_path]
+    if OUTRO_PATH.exists():
+        segments.append(str(OUTRO_PATH))
+
+    list_path = os.path.join(tmp_dir, "segments_list.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for p in segments:
+            f.write(f"file '{os.path.abspath(p).replace(chr(92), '/')}'\n")
+
+    try:
+        _run_ffmpeg([
+            "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c", "copy",
+            out_path,
+        ])
+    except RuntimeError:
+        logger.warning("concat -c copy failed (format mismatch) — re-encoding segments")
+        _run_ffmpeg([
+            "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(FPS),
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            out_path,
+        ])
+
+
+def _clean_headline(text: str, max_len: int = 80) -> str:
+    """Strip characters that break ffmpeg drawtext and cap length."""
+    text = _TICKER_STRIP_RE.sub("", (text or "").strip())
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
+
+
+def get_ticker_headlines(limit: int = 20, hours: int = 12) -> str:
+    """Build the scrolling ticker string from recent verified/broadcast
+    stories. Falls back to a static WNX24 slug if the DB is empty,
+    has no recent stories, or can't be reached."""
+    try:
+        from core.database import get_conn
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT title FROM stories
+            WHERE status IN ('verified', 'broadcast')
+            AND published_at >= ?
+            ORDER BY confidence DESC, published_at DESC
+            LIMIT ?
+        """, (cutoff, limit)).fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"get_ticker_headlines: DB query failed: {e}")
+        return TICKER_FALLBACK
+
+    headlines = [_clean_headline(row["title"]) for row in rows]
+    headlines = [h for h in headlines if h]
+    if not headlines:
+        return TICKER_FALLBACK
+
+    return "►  " + "  ●  ".join(headlines)
+
+
 def _add_ticker(in_path: str, out_path: str, ticker_text: str, tmp_dir: str) -> None:
     ticker_file = os.path.join(tmp_dir, "ticker.txt")
     with open(ticker_file, "w", encoding="utf-8") as f:
-        f.write(f"{ticker_text}     •     ")
+        f.write(f"{ticker_text}          ")
 
-    vf = (
-        f"drawtext=fontfile='{_ff_escape(FONT_BOLD)}':"
-        f"textfile='{_ff_escape(ticker_file)}':reload=0:"
-        f"fontcolor=white:fontsize=28:"
-        f"x=w-mod(t*{TICKER_SPEED}\\,tw+w):y=h-46"
+    bar_h   = 64           # total ticker bar height (px)
+    logo_h  = 56           # logo height — fills bar edge-to-edge (square icon = 56×56)
+    logo_x  = 0            # logo flush with left edge
+    div_x   = logo_h + 8  # divider x (8px gap after logo)
+    font_sz = 24           # ticker headline font size
+    # vertically centre text within bar
+    text_y  = bar_h // 2 + font_sz // 2 + 2
+    # logo fills full bar height — no vertical offset needed
+    logo_y_offset = (bar_h - logo_h) // 2
+
+    logo_esc = _ff_escape(TICKER_LOGO)
+    font_esc = _ff_escape(FONT_REG)
+    txt_esc  = _ff_escape(ticker_file)
+
+    # Stage 1 — load and scale logo with Lanczos for sharpness; keep original
+    # black background so it reads as a crisp dark badge against the red bar
+    logo_chain = (
+        f"movie='{logo_esc}',"
+        f"scale={logo_h}:{logo_h}:flags=lanczos"
+        f"[logo]"
     )
+
+    # Stage 2 — draw the red bar + border + divider + scrolling text onto main
+    main_chain = (
+        f"[0:v]"
+        f"drawbox=x=0:y=ih-{bar_h}:w=iw:h={bar_h}:color=0xe63946@0.95:t=fill,"
+        f"drawbox=x=0:y=ih-{bar_h+2}:w=iw:h=2:color=white@1.0:t=fill,"
+        f"drawbox=x={div_x}:y=ih-{bar_h}:w=2:h={bar_h}:color=white@0.6:t=fill,"
+        f"drawtext=fontfile='{font_esc}':"
+        f"textfile='{txt_esc}':reload=0:"
+        f"fontcolor=white:fontsize={font_sz}:"
+        f"x=w-mod(t*{TICKER_SPEED}\\,w+tw):y=h-{text_y}"
+        f"[vbase]"
+    )
+
+    # Stage 3 — overlay logo flush to the left edge of the bar
+    overlay_chain = (
+        f"[vbase][logo]overlay="
+        f"x={logo_x}:y=main_h-{bar_h}+{logo_y_offset}"
+    )
+
+    filter_complex = f"{logo_chain};{main_chain};{overlay_chain}"
+
     _run_ffmpeg([
         "-i", in_path,
-        "-vf", vf,
+        "-filter_complex", filter_complex,
         "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
@@ -289,26 +400,29 @@ def render_broadcast(
     section_audio: Dict[str, str],
     out_path:      str,
 ) -> float:
-    """Assemble a multi-scene MNN broadcast video from per-section
+    """Assemble a multi-scene WNX24 broadcast video from per-section
     narration audio. Returns the final video duration in seconds."""
+
+    ensure_assets()
 
     if not section_audio:
         raise ValueError("render_broadcast: no section audio provided")
 
-    headline = (script.hook or "Breaking News from MNN").strip()
+    headline = (script.hook or "Breaking News from WNX24").strip()
     out_dir  = os.path.dirname(os.path.abspath(out_path)) or "."
     os.makedirs(out_dir, exist_ok=True)
-    tmp_dir = tempfile.mkdtemp(prefix="_mnn_render_", dir=out_dir)
+    tmp_dir = tempfile.mkdtemp(prefix="_wnx24_render_", dir=out_dir)
 
     try:
         clips: List[str] = []
 
-        # Intro card (silent)
-        intro_png = os.path.join(tmp_dir, "intro.png")
-        intro_mp4 = os.path.join(tmp_dir, "intro.mp4")
-        _build_intro_frame(headline).save(intro_png)
-        _image_silent_clip(intro_png, INTRO_DURATION, intro_mp4)
-        clips.append(intro_mp4)
+        # Intro: fall back to programmatic card when assets/intro.mp4 is absent
+        if not INTRO_PATH.exists():
+            intro_png = os.path.join(tmp_dir, "intro.png")
+            intro_card = os.path.join(tmp_dir, "intro_card.mp4")
+            _build_intro_frame(headline).save(intro_png)
+            _image_silent_clip(intro_png, INTRO_DURATION, intro_card)
+            clips.append(intro_card)
 
         # One scene per scripted section with narration
         for section in SECTION_ORDER:
@@ -331,7 +445,7 @@ def render_broadcast(
 
         # Outro card (silent)
         outro_png = os.path.join(tmp_dir, "outro.png")
-        outro_mp4 = os.path.join(tmp_dir, "outro.mp4")
+        outro_mp4 = os.path.join(tmp_dir, "outro_card.mp4")
         _build_outro_frame(script.cta).save(outro_png)
         _image_silent_clip(outro_png, OUTRO_DURATION, outro_mp4)
         clips.append(outro_mp4)
@@ -341,12 +455,12 @@ def render_broadcast(
         _concat_clips(clips, concat_path, tmp_dir)
 
         # Burn in scrolling news ticker
-        ticker_text = "     •     ".join(filter(None, [
-            f"MNN — {config.channel.tagline}",
-            headline,
-            (config.anchor.sign_off or "").strip(),
-        ]))
-        _add_ticker(concat_path, out_path, ticker_text, tmp_dir)
+        ticker_text = get_ticker_headlines()
+        tickered_path = os.path.join(tmp_dir, "tickered.mp4")
+        _add_ticker(concat_path, tickered_path, ticker_text, tmp_dir)
+
+        # Prepend assets/intro.mp4 (and optional assets/outro.mp4)
+        _concat_segments(tickered_path, out_path, tmp_dir)
 
         duration = probe_duration(out_path)
         logger.info(f"Broadcast video assembled — {out_path} ({duration:.1f}s, {len(clips)} scenes)")

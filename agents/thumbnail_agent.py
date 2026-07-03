@@ -12,7 +12,7 @@ W, H        = 1280, 720
 FONT_DIR    = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")
 OUTPUT_DIR  = os.path.join(config.output_dir, "thumbnails")
 
-# ── Colours — Meridian brand ───────────────────────────────
+# ── Colours — WNX24 brand ───────────────────────────────
 COLOURS = {
     "bg_dark":      "#0d1117",
     "bg_panel":     "#161b22",
@@ -37,6 +37,14 @@ SHOW_ACCENTS = {
     "midday":       "#1d8cf8",
     "deep_dive":    "#ffd700",
     "mideast":      "#e63946",
+    "explainer":    "#17c3b2",
+    "pakistan":     "#2ecc71",
+    "world_affairs":"#4a90d9",
+    "economy":      "#f4b400",
+    "science":      "#9b59b6",
+    "health":       "#48dbfb",
+    "conflict":     "#c0392b",
+    "week_review":  "#ffd700",
     "primetime":    "#7b2d8b",
     "summary":      "#1d8cf8",
     "default":      "#1d8cf8",
@@ -105,7 +113,7 @@ def create_thumbnail(
     # Channel name
     draw.text(
         (24, 38),
-        "Meridian News Network",
+        "WNX24",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(36, bold=True),
         anchor = "lm",
@@ -132,6 +140,14 @@ def create_thumbnail(
         "cybersecurity":"● CYBER WATCH",
         "primetime":    "● PRIME TIME",
         "summary":      "● DAILY SUMMARY",
+        "explainer":    "● EXPLAINER",
+        "pakistan":     "● PAKISTAN",
+        "world_affairs":"● WORLD AFFAIRS",
+        "economy":      "● MARKETS",
+        "science":      "● SCIENCE",
+        "health":       "● HEALTH",
+        "conflict":     "● CONFLICT",
+        "week_review":  "● WEEK REVIEW",
     }.get(show_id, "● LIVE")
 
     font_badge = load_font(24, bold=True)
@@ -220,7 +236,7 @@ def create_thumbnail(
     )
     draw.text(
         (W // 2, H - 30),
-        f"Meridian News Network  |  {timestamp}",
+        f"WNX24  |  {timestamp}",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(22),
         anchor = "mm",
@@ -232,6 +248,17 @@ def create_thumbnail(
         font   = load_font(20),
         anchor = "rm",
     )
+
+    # ── WNX24 logo watermark ──────────────────────────────
+    logo_path = "assets/WNX24_thumb_logo.png"
+    if os.path.exists(logo_path):
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+            logo = logo.resize((80, 80), Image.LANCZOS)
+            # Position: top right corner
+            img.paste(logo, (img.width - 90, 10), logo)
+        except Exception as e:
+            logger.warning(f"Could not add logo watermark: {e}")
 
     # ── Save ───────────────────────────────────────────────
     filename   = f"thumb_{story.raw.id}_{show_id}.jpg"
@@ -253,7 +280,7 @@ def run_thumbnail_agent(
     show_id: str = "breaking",
 ) -> Thumbnail:
 
-    logger.info("Starting Thumbnail Agent — Meridian News Network")
+    logger.info("Starting Thumbnail Agent — WNX24")
     thumbnail = create_thumbnail(story, script, show_id)
     logger.info(f"Thumbnail Agent complete — {thumbnail.image_path}")
     return thumbnail

@@ -137,7 +137,7 @@ USE_HEYGEN = False
 
 def run_avatar_agent(script: VideoScript) -> AvatarVideo:
     if USE_HEYGEN and config.api.heygen_api_key:
-        logger.info("Starting Avatar Agent — Meridian News Network (HeyGen)")
+        logger.info("Starting Avatar Agent — WNX24 (HeyGen)")
         job_id, local_path = heygen.generate(script.full_text, script.duration_secs)
 
         if local_path and os.path.exists(local_path):
@@ -156,7 +156,7 @@ def run_avatar_agent(script: VideoScript) -> AvatarVideo:
 
         logger.warning("HeyGen video generation failed — falling back to local TTS + video")
 
-    logger.info("Starting Avatar Agent — Meridian News Network (local TTS + video)")
+    logger.info("Starting Avatar Agent — WNX24 (local TTS + video)")
 
     video = generate_local_video(script)
 

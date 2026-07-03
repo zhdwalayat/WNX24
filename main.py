@@ -6,7 +6,7 @@ from utils.helpers import ensure_dirs
 
 # ── Configure logging ──────────────────────────────────────
 logger.add(
-    os.path.join("output", "logs", "meridian_{time:YYYY-MM-DD}.log"),
+    os.path.join("output", "logs", "wnx24_{time:YYYY-MM-DD}.log"),
     rotation = "1 day",
     retention = "7 days",
     level    = "INFO",
@@ -18,8 +18,8 @@ def main():
 
     logger.info("")
     logger.info("╔══════════════════════════════════════════╗")
-    logger.info("║   MNN — MERIDIAN NEWS NETWORK — STARTING   ║")
-    logger.info("║      'Where the world meets.'            ║")
+    logger.info("║             WNX24 — STARTING             ║")
+    logger.info("║          'World News. Always.'           ║")
     logger.info("╚══════════════════════════════════════════╝")
     logger.info("")
 

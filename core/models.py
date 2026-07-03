@@ -50,6 +50,7 @@ class VideoScript(BaseModel):
     what_happened:  str = ""
     why_it_matters: str = ""
     expert_insight: str = ""
+    forward_look:   str = ""
     cta:            str = ""
     full_text:      str = ""
     word_count:     int = 0
