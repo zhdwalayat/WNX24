@@ -651,6 +651,7 @@
         </div>
         <video id="modal-video" controls style="width:100%;display:block;background:#000;max-height:70vh"></video>
         <div id="modal-meta" style="padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap"></div>
+        <div id="modal-stats" style="padding:0 16px 16px"></div>
       </div>
     </div>
 
@@ -662,6 +663,7 @@
 let isRunning   = false;
 let pollTimer   = null;
 let sessionStats = { runs: 0, stories: 0, words: 0, verified: 0 };
+let lastOutputs  = [];   // full /outputs payload, looked up by video filename on modal open
 
 // ── Run a show ─────────────────────────────────────────────
 async function runShow(showId) {
@@ -903,6 +905,7 @@ async function loadGallery() {
     const res  = await fetch("/outputs");
     const data = await res.json();
     const outputs = data.outputs || [];
+    lastOutputs = outputs;
     const grid = document.getElementById("gallery-grid");
     document.getElementById("gallery-count").textContent =
       `${outputs.length} video${outputs.length !== 1 ? "s" : ""}`;
@@ -913,7 +916,7 @@ async function loadGallery() {
     }
 
     grid.innerHTML = outputs.map(o => `
-      <div class="gallery-card" onclick="openModal('${escHtml(o.video)}','${escHtml(o.title)}','${escHtml(o.thumbnail||'')}','${escHtml(o.show)}','${escHtml(o.created_at)}','${o.size_mb}')">
+      <div class="gallery-card" onclick="openModal('${escHtml(o.video)}')">
         ${o.thumbnail
           ? `<img src="/thumbnail/${escHtml(o.thumbnail)}" class="gallery-thumb" alt="" onerror="this.parentNode.querySelector('.gallery-thumb-empty').style.display='flex';this.style.display='none'">`
           : ""
@@ -936,18 +939,51 @@ async function loadGallery() {
   }
 }
 
-function openModal(videoFile, title, thumb, show, date, sizeMb) {
+function openModal(videoFile) {
+  const o = lastOutputs.find(x => x.video === videoFile);
+  if (!o) return;
+
   const modal = document.getElementById("video-modal");
   const video = document.getElementById("modal-video");
-  document.getElementById("modal-title").textContent = title;
+  document.getElementById("modal-title").textContent = o.title;
   document.getElementById("modal-meta").innerHTML = `
-    ${show ? `<span class="show-tag">${escHtml(show)}</span>` : ""}
-    <span class="meta-pill">${escHtml(date)}</span>
-    <span class="meta-pill">${sizeMb} MB</span>
+    ${o.show ? `<span class="show-tag">${escHtml(o.show)}</span>` : ""}
+    <span class="meta-pill">${escHtml(o.created_at)}</span>
+    <span class="meta-pill">${o.size_mb} MB</span>
   `;
+  document.getElementById("modal-stats").innerHTML = renderAdminStats(o.stats);
   video.src = `/video/${videoFile}`;
   video.load();
   modal.style.display = "flex";
+}
+
+// Story statistics (region/status, cross-source count, breaking level…) —
+// never shown in the broadcast video itself, admin-review-only here in
+// the Control Room. See broadcast_os.orchestrator._save_stats_for_dashboard.
+function renderAdminStats(stats) {
+  if (!stats || Object.keys(stats).length === 0) return "";
+
+  const rows = [];
+  for (const [key, val] of Object.entries(stats)) {
+    if (val && typeof val === "object") {
+      for (const [k2, v2] of Object.entries(val)) rows.push([k2, v2]);
+    } else {
+      rows.push([key, val]);
+    }
+  }
+
+  return `
+    <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+      <div class="section-title">🔒 Admin Stats (not shown on air)</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${rows.map(([k, v]) => `
+          <span class="meta-pill" style="text-transform:capitalize">
+            ${escHtml(k.replace(/_/g, " "))}: <span style="color:var(--text)">${escHtml(String(v))}</span>
+          </span>
+        `).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function closeModal() {
@@ -955,6 +991,7 @@ function closeModal() {
   const video = document.getElementById("modal-video");
   video.pause();
   video.src = "";
+  document.getElementById("modal-stats").innerHTML = "";
   modal.style.display = "none";
 }
 

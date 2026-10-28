@@ -1,8 +1,10 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
-from typing import List, Optional
+
 from datetime import datetime
 from enum import Enum
+
+from pydantic import BaseModel, Field
+
 
 class SourceType(str, Enum):
     GOOGLE_NEWS   = "google_news"
@@ -33,14 +35,14 @@ class RawStory(BaseModel):
     source_name:  str
     published_at: datetime
     score:        float = 0.0          # engagement / upvotes
-    keywords:     List[str] = []
+    keywords:     list[str] = []
 
 # ── After verification agent ───────────────────────────────
 class VerifiedStory(BaseModel):
     raw:                RawStory
     confidence_score:   float
     status:             VerificationStatus
-    cross_sources:      List[str] = []  # other sources that confirmed it
+    cross_sources:      list[str] = []  # other sources that confirmed it
     verified_at:        datetime = Field(default_factory=datetime.utcnow)
 
 # ── Script produced by script-writer agent ────────────────
@@ -59,7 +61,7 @@ class VideoScript(BaseModel):
 
 # ── Avatar video returned by HeyGen ───────────────────────
 class AvatarVideo(BaseModel):
-    script:        Optional[VideoScript] = None
+    script:        VideoScript | None = None
     heygen_job_id: str = ""
     video_url:     str = ""
     local_path:    str = ""
@@ -80,6 +82,21 @@ class Thumbnail(BaseModel):
     def local_path(self) -> str:
         return self.image_path
 
+# ── Compliance/legal review of a script ────────────────────
+class ComplianceReport(BaseModel):
+    story_id:    str = ""
+    passed:      bool
+    risk_level:  str = "low"          # low, medium, high
+    issues:      list[str] = []
+    checked_at:  datetime = Field(default_factory=datetime.utcnow)
+
+# ── Editorial style-guide lint of a script ─────────────────
+class StyleReport(BaseModel):
+    story_id:   str = ""
+    passed:     bool
+    issues:     list[str] = []
+    checked_at: datetime = Field(default_factory=datetime.utcnow)
+
 # ── Final video package ready for upload ──────────────────
 class VideoPackage(BaseModel):
     story:       VerifiedStory
@@ -88,7 +105,7 @@ class VideoPackage(BaseModel):
     thumbnail:   Thumbnail
     title:       str = ""
     description: str = ""
-    tags:        List[str] = []
+    tags:        list[str] = []
     status:      VideoStatus = VideoStatus.PENDING
     youtube_url: str = ""
     created_at:  datetime = Field(default_factory=datetime.now)

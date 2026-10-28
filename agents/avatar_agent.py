@@ -1,83 +1,28 @@
+"""agents/avatar_agent.py — Avatar Agent (fallback video pipeline).
+
+Deterministic pipeline (no LLM reasoning involved) — per
+https://agentfactory.panaversity.org/'s Gate 1a, generating narration
+via edge-tts and assembling a fixed sequence of ffmpeg calls is "one
+exact step that is the same every time," not agent work. Used only
+when video_composer.run_video_composer (the primary pipeline) fails;
+see orchestrator.py's fallback in run_broadcast(). Delegates TTS to
+voice_agent.text_to_speech instead of keeping its own copy of the
+lock/retry logic.
+"""
 import os
-import asyncio
 import uuid
 from pathlib import Path
+
 from loguru import logger
 
-from core.models import VideoScript, AvatarVideo, VideoStatus
+from agents.voice_agent import DEFAULT_VOICE, text_to_speech
 from config.settings import config
-from video.heygen_client import heygen
+from core.models import AvatarVideo, VideoScript, VideoStatus
 from video import video_editor
+from video.heygen_client import heygen
 
 # ── Edge-TTS voice ─────────────────────────────────────────
-TTS_VOICE  = os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural")   # free Microsoft neural voice
-
-
-# ── Step 1: Text → speech (edge-tts, fully free) ──────────
-async def _tts_async(text: str, out_path: str) -> None:
-    import edge_tts
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
-    await communicate.save(out_path)
-
-
-_TTS_LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "output", "tts.lock")
-
-
-_TTS_LOCK_STALE_SECS = 180   # a held lock older than this is from a dead process
-
-
-def _acquire_tts_lock(timeout: int = 120) -> None:
-    """Busy-wait until no other process holds the TTS lock file."""
-    import time as _time
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
-        try:
-            fd = os.open(_TTS_LOCK_FILE,
-                         os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            return                          # lock acquired
-        except FileExistsError:
-            try:
-                age = _time.time() - os.path.getmtime(_TTS_LOCK_FILE)
-                if age > _TTS_LOCK_STALE_SECS:
-                    logger.warning(
-                        f"Removing stale TTS lock (age {age:.0f}s)"
-                    )
-                    os.remove(_TTS_LOCK_FILE)
-                    continue
-            except FileNotFoundError:
-                continue                   # lock released between checks
-            _time.sleep(0.5)               # another process holds it
-    raise RuntimeError("Could not acquire TTS lock after timeout")
-
-
-def _release_tts_lock() -> None:
-    try:
-        os.remove(_TTS_LOCK_FILE)
-    except FileNotFoundError:
-        pass
-
-
-def _text_to_speech(text: str, out_path: str, retries: int = 3) -> None:
-    import time as _time
-
-    _acquire_tts_lock()
-    try:
-        for attempt in range(1, retries + 1):
-            try:
-                asyncio.run(_tts_async(text, out_path))
-                if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
-                    logger.info(f"TTS saved → {out_path} ({os.path.getsize(out_path)} bytes)")
-                    return
-                logger.warning(f"TTS attempt {attempt}: empty file, retrying...")
-            except Exception as e:
-                logger.warning(f"TTS attempt {attempt} error: {e}")
-            _time.sleep(3 * attempt)
-        raise RuntimeError(f"TTS failed after {retries} attempts")
-    finally:
-        _release_tts_lock()
+TTS_VOICE = os.getenv("EDGE_TTS_VOICE", DEFAULT_VOICE)
 
 
 # ── Main: generate local video ─────────────────────────────
@@ -97,7 +42,7 @@ def generate_local_video(script: VideoScript) -> AvatarVideo:
                 continue
             audio_path = str(output_dir / f"{job_id}_{section}.mp3")
             logger.info(f"TTS [{section}] — {len(text)} chars via edge-tts ({TTS_VOICE})")
-            _text_to_speech(text, audio_path)
+            text_to_speech(text, audio_path, voice=TTS_VOICE)
             section_audio[section] = audio_path
     except Exception as e:
         logger.error(f"TTS failed: {e}")

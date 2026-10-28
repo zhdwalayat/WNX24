@@ -1,13 +1,22 @@
-import httpx
-import feedparser
+"""agents/trend_detection_agent.py — Trend Detection Agent.
+
+Deterministic scraping (no LLM reasoning involved) — per
+https://agentfactory.panaversity.org/'s Gate 1a, this is a fixed
+"call these feeds/endpoints, keyword-filter the results" procedure,
+so it follows the same plain-function style as news_api_agent.py
+rather than wrapping an LLM around it.
+"""
 import hashlib
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote_plus
-from typing import List
+
+import feedparser
+import httpx
 from loguru import logger
 
-from core.models import RawStory, SourceType
 from config.settings import config
+from core.models import RawStory, SourceType
+
 
 # ── Helpers ───────────────────────────────────────────────
 def make_id(url: str) -> str:
@@ -20,7 +29,8 @@ TRUSTED_GLOBAL = {
     "financial times", "wall street journal", "bloomberg", "cnbc",
     "dawn pakistan", "the news pakistan", "tribune pakistan",
     "middle east eye", "al monitor", "al arabiya", "radio free europe",
-    "guardian world", "reuters", "associated press",
+    "guardian world", "reuters", "associated press", "un news",
+    "uk government", "bbc africa", "africanews", "news24",
 }
 
 # Category base scores — world/economy/conflict compete with tech
@@ -32,7 +42,8 @@ CATEGORY_SCORES = {
     "DW World":          75.0, "Foreign Policy":     75.0,
     "Radio Free Europe": 72.0, "Guardian World":     75.0,
     "Middle East Eye":   72.0, "Al Arabiya":         70.0,
-    "Al Monitor":        70.0,
+    "Al Monitor":        70.0, "UN News":            72.0,
+    "UK Government":     70.0,
     # Economy & markets
     "Financial Times":   80.0, "Wall Street Journal":78.0,
     "Bloomberg":         78.0, "CNBC":               75.0,
@@ -48,6 +59,9 @@ CATEGORY_SCORES = {
     # South Asia
     "Dawn Pakistan":     72.0, "The News Pakistan":  68.0,
     "Tribune Pakistan":  68.0,
+    # Africa
+    "BBC Africa":        78.0, "Africanews":         75.0,
+    "News24":            68.0, "AllAfrica":          65.0,
 }
 
 def get_rss_score(source_name: str) -> float:
@@ -65,15 +79,15 @@ def is_relevant(text: str, source_name: str = "") -> bool:
     return any(k.lower() in text_lower for k in config.content.keywords)
 
 def is_recent(published: datetime) -> bool:
-    cutoff = datetime.now(timezone.utc) - timedelta(
+    cutoff = datetime.now(UTC) - timedelta(
         hours=config.content.lookback_hours
     )
     if published.tzinfo is None:
-        published = published.replace(tzinfo=timezone.utc)
+        published = published.replace(tzinfo=UTC)
     return published >= cutoff
 
 # ── Scraper 1: Google News RSS (multiple queries) ──────────
-def scrape_google_news() -> List[RawStory]:
+def scrape_google_news() -> list[RawStory]:
     stories = []
     queries = [
         "world news today",
@@ -87,7 +101,11 @@ def scrape_google_news() -> List[RawStory]:
         url = (f"https://news.google.com/rss/search"
                f"?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en")
         try:
-            feed = feedparser.parse(url)
+            # feedparser.parse(url) has no timeout of its own and can
+            # hang indefinitely on a slow/unresponsive server — fetch
+            # via httpx (bounded timeout) and hand feedparser the bytes.
+            resp = httpx.get(url, timeout=10, follow_redirects=True)
+            feed = feedparser.parse(resp.content)
             added = 0
             for entry in feed.entries[:15]:
                 title   = entry.get("title", "")
@@ -99,9 +117,9 @@ def scrape_google_news() -> List[RawStory]:
                     continue
                 try:
                     published = datetime(*entry.published_parsed[:6],
-                                        tzinfo=timezone.utc)
+                                        tzinfo=UTC)
                 except Exception:
-                    published = datetime.now(timezone.utc)
+                    published = datetime.now(UTC)
                 if not is_recent(published):
                     continue
                 stories.append(RawStory(
@@ -126,7 +144,7 @@ def scrape_google_news() -> List[RawStory]:
     return stories
 
 # ── Scraper 2: Hacker News (capped score) ─────────────────
-def scrape_hacker_news() -> List[RawStory]:
+def scrape_hacker_news() -> list[RawStory]:
     stories = []
     base = "https://hacker-news.firebaseio.com/v0"
 
@@ -151,7 +169,7 @@ def scrape_hacker_news() -> List[RawStory]:
                 continue
 
             published = datetime.fromtimestamp(
-                item.get("time", 0), tz=timezone.utc
+                item.get("time", 0), tz=UTC
             )
             if not is_recent(published):
                 continue
@@ -176,7 +194,7 @@ def scrape_hacker_news() -> List[RawStory]:
     return stories
 
 # ── Scraper 3: Reddit ─────────────────────────────────────
-def scrape_reddit() -> List[RawStory]:
+def scrape_reddit() -> list[RawStory]:
     stories = []
     subreddits = ["worldnews", "geopolitics", "economics",
                   "artificial", "technology", "science"]
@@ -184,7 +202,10 @@ def scrape_reddit() -> List[RawStory]:
     for sub in subreddits:
         try:
             url  = f"https://www.reddit.com/r/{sub}/hot.rss?limit=20"
-            feed = feedparser.parse(url)
+            # See scrape_google_news — feedparser.parse(url) has no
+            # timeout and can hang indefinitely; fetch via httpx instead.
+            resp = httpx.get(url, timeout=10, follow_redirects=True)
+            feed = feedparser.parse(resp.content)
 
             for entry in feed.entries[:20]:
                 title   = entry.get("title", "")
@@ -196,12 +217,12 @@ def scrape_reddit() -> List[RawStory]:
                     continue
                 try:
                     published = datetime(*entry.published_parsed[:6],
-                                        tzinfo=timezone.utc) \
+                                        tzinfo=UTC) \
                         if hasattr(entry, "published_parsed") \
                         and entry.published_parsed \
-                        else datetime.now(timezone.utc)
+                        else datetime.now(UTC)
                 except Exception:
-                    published = datetime.now(timezone.utc)
+                    published = datetime.now(UTC)
                 if not is_recent(published):
                     continue
 
@@ -224,7 +245,7 @@ def scrape_reddit() -> List[RawStory]:
     return stories
 
 # ── Generic RSS feed scraper ──────────────────────────────
-def scrape_rss_feeds(feeds: dict) -> List[RawStory]:
+def scrape_rss_feeds(feeds: dict) -> list[RawStory]:
     """Scrape an arbitrary {source_name: feed_url} dict of RSS feeds."""
     stories = []
 
@@ -245,12 +266,12 @@ def scrape_rss_feeds(feeds: dict) -> List[RawStory]:
                     continue
                 try:
                     published = datetime(
-                        *entry.published_parsed[:6], tzinfo=timezone.utc
+                        *entry.published_parsed[:6], tzinfo=UTC
                     ) if hasattr(entry, "published_parsed") \
                       and entry.published_parsed \
-                      else datetime.now(timezone.utc)
+                      else datetime.now(UTC)
                 except Exception:
-                    published = datetime.now(timezone.utc)
+                    published = datetime.now(UTC)
                 if not is_recent(published):
                     continue
 
@@ -277,7 +298,7 @@ def scrape_rss_feeds(feeds: dict) -> List[RawStory]:
 
 
 # ── Scraper 4: Mainstream Media RSS ───────────────────────
-def scrape_mainstream_media() -> List[RawStory]:
+def scrape_mainstream_media() -> list[RawStory]:
     feeds = {
         # ── World News (top priority — these lead the bulletin) ──
         "AP News":              "https://feeds.apnews.com/rss/TopNews",
@@ -289,6 +310,14 @@ def scrape_mainstream_media() -> List[RawStory]:
         "Guardian World":       "https://www.theguardian.com/world/rss",
         "Radio Free Europe":    "https://www.rferl.org/api/epjfpqum",
         "Foreign Policy":       "https://foreignpolicy.com/feed/",
+        # Tier 1 relies on the story URL's domain (.un.org, .who.int,
+        # .gov, etc.) to detect an official government/IGO source —
+        # these two feeds are what actually give it live un.org/gov.uk
+        # data instead of source-tier entries no scraper ever produces.
+        # (NATO's RSS feed URL is stale/404 as of this writing — left
+        # out rather than added as a knowingly-dead entry.)
+        "UN News":              "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+        "UK Government":        "https://www.gov.uk/search/news-and-communications.atom",
 
         # ── Economy & Markets ─────────────────────────────────────
         "Financial Times":      "https://www.ft.com/rss/home",
@@ -368,6 +397,12 @@ def scrape_mainstream_media() -> List[RawStory]:
         "TRT World":            "https://www.trtworld.com/rss",
         "NHK World":            "https://www3.nhk.or.jp/rss/news/cat0.xml",
         "The Hindu":            "https://www.thehindu.com/feeder/default.rss",
+
+        # ── Africa ─────────────────────────────────────────────────
+        "BBC Africa":           "https://feeds.bbci.co.uk/news/world/africa/rss.xml",
+        "Africanews":           "https://www.africanews.com/feed/rss",
+        "AllAfrica":            "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf",
+        "News24":               "https://feeds.news24.com/articles/news24/TopStories/rss",
     }
 
     stories = scrape_rss_feeds(feeds)
@@ -375,7 +410,7 @@ def scrape_mainstream_media() -> List[RawStory]:
     return stories
 
 # ── Main agent function ────────────────────────────────────
-def run_trend_detection() -> List[RawStory]:
+def run_trend_detection() -> list[RawStory]:
     logger.info("Starting Trend Detection Agent...")
 
     all_stories = []

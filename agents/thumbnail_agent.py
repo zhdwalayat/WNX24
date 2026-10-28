@@ -1,11 +1,22 @@
+"""agents/thumbnail_agent.py — Thumbnail Agent.
+
+Deterministic templating (no LLM reasoning) — per
+https://agentfactory.panaversity.org/'s Gate 1a, compositing a
+headline/background/badge onto a fixed 1280x720 canvas with PIL is
+"one exact step that is the same every time," not agent work. The
+headline text itself is delegated to agents/headline_agent.py (a
+genuine agent), with the raw story title as a fallback if that call
+fails.
+"""
 import os
 import textwrap
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
-from loguru import logger
 
-from core.models import VerifiedStory, VideoScript, Thumbnail
+from loguru import logger
+from PIL import Image, ImageDraw, ImageFont
+
 from config.settings import config
+from core.models import Thumbnail, VerifiedStory, VideoScript
 
 # ── Constants ──────────────────────────────────────────────
 W, H        = 1280, 720
@@ -55,8 +66,6 @@ def hex_rgb(colour: str) -> tuple:
     h = colour.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
-_hex = hex_rgb
-
 
 def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     try:
@@ -68,8 +77,6 @@ def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
             return ImageFont.truetype(f"C:/Windows/Fonts/{font_name}", size)
         except Exception:
             return ImageFont.load_default()
-
-_load_font = load_font
 
 
 def draw_rounded_rect(
@@ -171,7 +178,16 @@ def create_thumbnail(
     draw.rectangle([24, 148, 180, 154], fill=hex_rgb(accent))
 
     # ── Main headline ──────────────────────────────────────
-    headline = make_headline(story.raw.title, max_words=8)
+    # headline_agent gives a punchier, LLM-written headline than the raw
+    # scraped title; fall back to the title itself if that call fails so
+    # a thumbnail can never fail to render because of it.
+    try:
+        from agents.headline_agent import run_headline_agent
+        raw_headline = run_headline_agent(story)
+    except Exception as e:
+        logger.warning(f"Headline Agent failed, falling back to story title: {e}")
+        raw_headline = story.raw.title
+    headline = make_headline(raw_headline, max_words=8)
 
     if len(headline) <= 30:
         fnt = load_font(68, bold=True)

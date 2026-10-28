@@ -5,28 +5,37 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
 
 import imageio_ffmpeg
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
 
-from core.models import VideoScript
 from config.settings import config
+from core.models import VideoScript
 
 # ── Paths ──────────────────────────────────────────────────
 ROOT_DIR   = Path(__file__).resolve().parent.parent
 ASSETS_DIR = ROOT_DIR / "assets"
 FONT_BOLD  = str(ASSETS_DIR / "fonts" / "DejaVuSansMono-Bold.ttf")
 FONT_REG   = str(ASSETS_DIR / "fonts" / "DejaVuSansMono.ttf")
+NEWSROOM_BG = ASSETS_DIR / "newsroom_bg.jpg"
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 # ── Frame / encode settings ───────────────────────────────────
 FRAME_W, FRAME_H = 1280, 720
 FPS              = 24
+
+# Content box where scene content is drawn — scaled down from
+# video_composer's 1920x1080 layout (220,80)-(1330,630) to this module's
+# 1280x720 frame, so the same show-menu (left), markets/clocks (right)
+# and ticker (bottom) gutters of assets/newsroom_bg.jpg stay visible.
+CONTENT_X0, CONTENT_Y0 = 147, 53
+CONTENT_X1, CONTENT_Y1 = 887, 420
+CONTENT_W = CONTENT_X1 - CONTENT_X0
+CONTENT_H = CONTENT_Y1 - CONTENT_Y0
 
 # ── Colour palette ─────────────────────────────────────────
 BG_COLOUR     = (10,  12,  40)   # dark navy
@@ -85,7 +94,7 @@ def _ff_escape(path: str) -> str:
     return str(path).replace("\\", "/").replace(":", r"\:")
 
 
-def _run_ffmpeg(args: List[str]) -> None:
+def _run_ffmpeg(args: list[str]) -> None:
     cmd = [FFMPEG, "-y", "-loglevel", "error"] + args
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -103,14 +112,14 @@ def probe_duration(path: str) -> float:
 
 
 # ── Pillow drawing helpers ─────────────────────────────────
-def _font(path: str, size: int) -> "ImageFont.FreeTypeFont":
+def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
     try:
         return ImageFont.truetype(path, size)
     except Exception:
         return ImageFont.load_default()
 
 
-def _wrap_lines(text: str, width: int, max_lines: int) -> List[str]:
+def _wrap_lines(text: str, width: int, max_lines: int) -> list[str]:
     lines = textwrap.wrap((text or "").strip(), width=width) or [""]
     if len(lines) > max_lines:
         lines = lines[:max_lines]
@@ -121,69 +130,87 @@ def _wrap_lines(text: str, width: int, max_lines: int) -> List[str]:
     return lines
 
 
-def _centred_x(draw: "ImageDraw.ImageDraw", text: str, font) -> int:
+def _centred_x(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     bbox = draw.textbbox((0, 0), text, font=font)
     return (FRAME_W - (bbox[2] - bbox[0])) // 2
 
 
-def _draw_branding(draw: "ImageDraw.ImageDraw") -> None:
+def _centred_x_box(draw: ImageDraw.ImageDraw, text: str, font, x0: int, x1: int) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return x0 + ((x1 - x0) - (bbox[2] - bbox[0])) // 2
+
+
+def _base_frame() -> Image.Image:
+    """Start every scene from the shared WNX24 newsroom background so the
+    show-menu (left) and markets/clock (right) panels stay visible around
+    scene content — falls back to a plain navy card if the asset is missing."""
+    if NEWSROOM_BG.exists():
+        return Image.open(NEWSROOM_BG).convert("RGB").resize((FRAME_W, FRAME_H), Image.LANCZOS)
+    return Image.new("RGB", (FRAME_W, FRAME_H), BG_COLOUR)
+
+
+def _draw_branding(draw: ImageDraw.ImageDraw) -> None:
     font = _font(FONT_BOLD, 36)
     draw.text((50, 30), "WNX24", fill=TICKER_COLOUR, font=font)
     draw.line([(50, 84), (FRAME_W - 50, 84)], fill=ACCENT_COLOUR, width=4)
 
 
-def _draw_label_badge(draw: "ImageDraw.ImageDraw", label: str) -> None:
-    font = _font(FONT_BOLD, 32)
+def _draw_label_badge(draw: ImageDraw.ImageDraw, label: str) -> None:
+    """Draw the section badge (e.g. "BREAKING") anchored to the top-left
+    of the content box — the newsroom background already supplies the
+    persistent WNX24 top-bar branding, so scenes only need this dynamic
+    per-section label."""
+    font = _font(FONT_BOLD, 26)
     bbox = draw.textbbox((0, 0), label, font=font)
-    badge_w = (bbox[2] - bbox[0]) + 50
-    draw.rectangle([50, 110, 50 + badge_w, 162], fill=ACCENT_COLOUR)
-    draw.text((75, 119), label, fill=(255, 255, 255), font=font)
+    badge_w = (bbox[2] - bbox[0]) + 36
+    x0, y0 = CONTENT_X0, CONTENT_Y0
+    draw.rectangle([x0, y0, x0 + badge_w, y0 + 40], fill=ACCENT_COLOUR)
+    draw.text((x0 + 18, y0 + 7), label, fill=(255, 255, 255), font=font)
 
 
 # ── Scene frame builders ───────────────────────────────────
-def _build_hook_frame(headline: str) -> "Image.Image":
-    img  = Image.new("RGB", (FRAME_W, FRAME_H), BG_COLOUR)
+def _build_hook_frame(headline: str) -> Image.Image:
+    img  = _base_frame()
     draw = ImageDraw.Draw(img)
-    _draw_branding(draw)
     _draw_label_badge(draw, SECTION_LABELS["hook"])
 
-    font  = _font(FONT_BOLD, 56)
-    lines = _wrap_lines(headline or "Breaking News from WNX24", width=22, max_lines=4)
-    line_h  = 76
+    font  = _font(FONT_BOLD, 34)
+    lines = _wrap_lines(headline or "Breaking News from WNX24", width=16, max_lines=4)
+    line_h  = 44
     total_h = len(lines) * line_h
-    y = (FRAME_H - 162 - total_h) // 2 + 162
+    badge_bottom = CONTENT_Y0 + 40
+    y = badge_bottom + max(10, (CONTENT_Y1 - badge_bottom - total_h) // 2)
     for line in lines:
-        draw.text((_centred_x(draw, line, font), y), line, fill=TEXT_COLOUR, font=font)
+        draw.text((_centred_x_box(draw, line, font, CONTENT_X0, CONTENT_X1), y), line, fill=TEXT_COLOUR, font=font)
         y += line_h
     return img
 
 
-def _build_section_frame(section: str, headline: str, body: str) -> "Image.Image":
-    img  = Image.new("RGB", (FRAME_W, FRAME_H), BG_COLOUR)
+def _build_section_frame(section: str, headline: str, body: str) -> Image.Image:
+    img  = _base_frame()
     draw = ImageDraw.Draw(img)
-    _draw_branding(draw)
     _draw_label_badge(draw, SECTION_LABELS.get(section, section.upper()))
 
     # Story headline strip for context
-    head_font = _font(FONT_REG, 24)
-    head_line = _wrap_lines(headline, width=82, max_lines=1)[0]
-    draw.text((50, 178), head_line, fill=(190, 195, 215), font=head_font)
+    head_font = _font(FONT_REG, 16)
+    head_line = _wrap_lines(headline, width=50, max_lines=1)[0]
+    draw.text((CONTENT_X0, CONTENT_Y0 + 46), head_line, fill=(190, 195, 215), font=head_font)
 
     # Body text
-    body_font = _font(FONT_REG, 30)
-    body_top, ticker_top, line_h = 236, FRAME_H - 60, 44
-    max_lines = max(1, (ticker_top - body_top) // line_h)
-    lines = _wrap_lines(body, width=56, max_lines=max_lines)
+    body_font = _font(FONT_REG, 20)
+    body_top, line_h = CONTENT_Y0 + 80, 28
+    max_lines = max(1, (CONTENT_Y1 - body_top) // line_h)
+    lines = _wrap_lines(body, width=36, max_lines=max_lines)
     y = body_top
     for line in lines:
-        draw.text((50, y), line, fill=TEXT_COLOUR, font=body_font)
+        draw.text((CONTENT_X0, y), line, fill=TEXT_COLOUR, font=body_font)
         y += line_h
 
     return img
 
 
-def _build_intro_frame(headline: str) -> "Image.Image":
-    img  = Image.new("RGB", (FRAME_W, FRAME_H), BG_COLOUR)
+def _build_intro_frame(headline: str) -> Image.Image:
+    img  = _base_frame()
     draw = ImageDraw.Draw(img)
 
     logo_font = _font(FONT_BOLD, 100)
@@ -208,8 +235,8 @@ def _build_intro_frame(headline: str) -> "Image.Image":
     return img
 
 
-def _build_outro_frame(sign_off: str) -> "Image.Image":
-    img  = Image.new("RGB", (FRAME_W, FRAME_H), BG_COLOUR)
+def _build_outro_frame(sign_off: str) -> Image.Image:
+    img  = _base_frame()
     draw = ImageDraw.Draw(img)
     _draw_branding(draw)
 
@@ -252,7 +279,7 @@ def _image_silent_clip(image_path: str, duration: float, out_path: str) -> None:
     ])
 
 
-def _concat_clips(clip_paths: List[str], out_path: str, tmp_dir: str) -> None:
+def _concat_clips(clip_paths: list[str], out_path: str, tmp_dir: str) -> None:
     list_path = os.path.join(tmp_dir, "concat_list.txt")
     with open(list_path, "w", encoding="utf-8") as f:
         for p in clip_paths:
@@ -314,7 +341,7 @@ def get_ticker_headlines(limit: int = 20, hours: int = 12) -> str:
     try:
         from core.database import get_conn
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         conn = get_conn()
         rows = conn.execute("""
             SELECT title FROM stories
@@ -397,7 +424,7 @@ def _add_ticker(in_path: str, out_path: str, ticker_text: str, tmp_dir: str) -> 
 # ── Main entry point ───────────────────────────────────────
 def render_broadcast(
     script:        VideoScript,
-    section_audio: Dict[str, str],
+    section_audio: dict[str, str],
     out_path:      str,
 ) -> float:
     """Assemble a multi-scene WNX24 broadcast video from per-section
@@ -414,7 +441,7 @@ def render_broadcast(
     tmp_dir = tempfile.mkdtemp(prefix="_wnx24_render_", dir=out_dir)
 
     try:
-        clips: List[str] = []
+        clips: list[str] = []
 
         # Intro: fall back to programmatic card when assets/intro.mp4 is absent
         if not INTRO_PATH.exists():

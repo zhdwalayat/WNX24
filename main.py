@@ -1,7 +1,9 @@
 # main.py
-import sys
 import os
+import sys
+
 from loguru import logger
+
 from utils.helpers import ensure_dirs
 
 # ── Configure logging ──────────────────────────────────────
@@ -23,7 +25,7 @@ def main():
     logger.info("╚══════════════════════════════════════════╝")
     logger.info("")
 
-    from orchestrator import start_24_7, run_now
+    from orchestrator import run_now, start_24_7
 
     if len(sys.argv) > 1:
         show_id = sys.argv[1]

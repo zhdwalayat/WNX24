@@ -6,16 +6,17 @@ Run:  uvicorn dashboard.app:app --reload --port 8000
 Open: http://localhost:8000
 """
 
-import os
-import sys
-import json
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Any
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -37,9 +38,9 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 # ── In-memory state ────────────────────────────────────────
-broadcast_log:     List[Dict]     = []
-broadcast_history: List[Dict]     = []
-current_run:       Dict[str, Any] = {}
+broadcast_log:     list[dict]     = []
+broadcast_history: list[dict]     = []
+current_run:       dict[str, Any] = {}
 is_running:        bool           = False
 
 # ── Broadcast deduplication ────────────────────────────────
@@ -304,8 +305,17 @@ async def list_outputs():
     if not VIDEO_DIR.exists():
         return JSONResponse({"outputs": []})
 
+    # BroadcastOS names files "{show_id}_{story_id}_broadcastos_{timestamp}.mp4"
+    # — story_id is always a 12-char hex hash (agents/trend_detection_agent.py's
+    # md5(url)[:12] or a uuid4 fallback), so pull it out from the middle of the
+    # filename rather than using the whole stem, which would never match the
+    # per-story metadata/stats sidecar files. Falls back to the whole stem for
+    # any older/differently-named video (e.g. the legacy avatar_agent pipeline).
+    _STORY_ID_RE = re.compile(r"_([0-9a-f]{12})_broadcastos_")
+
     for video_file in sorted(VIDEO_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True):
-        story_id = video_file.stem          # e.g. 26c53171811e
+        m = _STORY_ID_RE.search(video_file.stem)
+        story_id = m.group(1) if m else video_file.stem
 
         # Find matching thumbnail (any show suffix)
         thumb_files = list(THUMB_DIR.glob(f"thumb_{story_id}_*.jpg")) if THUMB_DIR.exists() else []
@@ -322,8 +332,20 @@ async def list_outputs():
         meta_files = list(META_DIR.glob(f"{story_id}_metadata.json")) if META_DIR.exists() else []
         if meta_files:
             try:
-                with open(meta_files[0]) as f:
+                with open(meta_files[0], encoding="utf-8") as f:
                     meta = json.load(f)
+            except Exception:
+                pass
+
+        # Story statistics — not shown in the broadcast video itself, only
+        # here for admin review (broadcast_os.orchestrator saves this
+        # sidecar file per broadcast; see _save_stats_for_dashboard).
+        stats = {}
+        stats_files = list(META_DIR.glob(f"{story_id}_stats.json")) if META_DIR.exists() else []
+        if stats_files:
+            try:
+                with open(stats_files[0], encoding="utf-8") as f:
+                    stats = json.load(f)
             except Exception:
                 pass
 
@@ -339,6 +361,7 @@ async def list_outputs():
             "tags":       meta.get("tags", [])[:5],
             "size_mb":    size_mb,
             "created_at": mtime,
+            "stats":      stats,
         })
 
     return JSONResponse({"outputs": items})
@@ -347,8 +370,9 @@ async def list_outputs():
 # ── Health endpoint ────────────────────────────────────────
 @app.get("/health")
 async def health_check():
+    from datetime import datetime
+
     from core.database import get_stats
-    from datetime import datetime, timezone
 
     # Check DB
     try:
@@ -386,7 +410,7 @@ async def health_check():
     return JSONResponse({
         "status":        status,
         "channel":       config.channel.name,
-        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "timestamp":     datetime.now(UTC).isoformat(),
         "timestamp_pkt": datetime.now().strftime("%d %b %Y %H:%M PKT"),
         "pipeline": {
             "is_running":              is_running,
@@ -409,42 +433,26 @@ async def health_check():
 # ── Corrections endpoint ───────────────────────────────────
 @app.post("/correct/{story_id}")
 async def flag_correction(story_id: str, note: str = ""):
-    """Flag a broadcast story as incorrect."""
-    try:
-        from core.database import get_conn
-        conn = get_conn()
-        row  = conn.execute(
-            "SELECT * FROM broadcasts WHERE story_id=?",
-            (story_id,)
-        ).fetchone()
-        conn.close()
-
-        if not row:
-            return JSONResponse(
-                {"error": "Broadcast not found"},
-                status_code=404
-            )
-
-        correction_note = (
-            f"\n\n⚠️ CORRECTION ({datetime.now().strftime('%d %b %Y')}): "
-            + (note or "This story has been updated. "
-               "Please refer to our latest coverage.")
-        )
-
-        _log(
-            f"Correction flagged for story {story_id}: {note}",
-            "warning"
-        )
-
-        return JSONResponse({
-            "status":      "flagged",
-            "story_id":    story_id,
-            "note":        correction_note,
-            "youtube_url": row["youtube_url"] or "",
-        })
-
-    except Exception as e:
+    """Flag a broadcast story as incorrect — drafts a public correction
+    via agents/corrections_agent.py, publishes it to the video
+    (description + comment) if it's a real upload, and records it in
+    the `corrections` table regardless."""
+    if not note:
         return JSONResponse(
-            {"error": str(e)},
-            status_code=500
+            {"error": "note is required — describe what was wrong"},
+            status_code=400,
         )
+    try:
+        from agents.corrections_agent import run_corrections_agent
+        result = run_corrections_agent(story_id, note)
+        _log(
+            f"Correction published for story {story_id}: "
+            f"{result['correction_text'][:80]}",
+            "warning",
+        )
+        return JSONResponse({"status": "published" if result["published"] else "recorded", **result})
+
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)

@@ -1,18 +1,19 @@
 # scraper/news_watcher.py
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime
-from loguru import logger
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from loguru import logger
 from pytz import timezone as pytz_timezone
 
 from agents.trend_detection_agent import run_trend_detection, scrape_rss_feeds
 from agents.verification_agent import run_verification
-from core.database import init_db, save_stories, get_stats
+from core.database import get_stats, init_db, save_stories
 
 # ── PKT timezone ───────────────────────────────────────────
 PKT = pytz_timezone("Asia/Karachi")

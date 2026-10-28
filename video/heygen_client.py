@@ -1,8 +1,10 @@
 # video/heygen_client.py
 import os
 import time
+
 import httpx
 from loguru import logger
+
 from config.settings import config
 
 HEYGEN_BASE = "https://api.heygen.com"

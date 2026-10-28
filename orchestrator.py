@@ -1,30 +1,29 @@
 # orchestrator.py
-import os
-import sys
 import json
-import time
-from datetime import datetime, timezone, timedelta
-from typing import Set, List
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from loguru import logger
 
 from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from loguru import logger
 from pytz import timezone as pytz_timezone
 
 from config.settings import config
 from core.database import (
-    init_db, get_fresh_stories,
-    mark_broadcast, save_broadcast,
-    get_stats
+    get_fresh_stories,
+    get_stats,
+    init_db,
+    mark_broadcast,
+    save_broadcast,
+    save_stories,
 )
 
 # ── Broadcast history persistence ─────────────────────────
 HISTORY_FILE = "output/metadata/broadcast_history.json"
 
-def _load_history() -> Set[str]:
+def _load_history() -> set[str]:
     try:
         path = Path(HISTORY_FILE)
         if path.exists():
@@ -44,13 +43,13 @@ def _save_history() -> None:
     except Exception as e:
         logger.warning(f"Could not save broadcast history: {e}")
 
-broadcast_history: Set[str] = _load_history()
+broadcast_history: set[str] = _load_history()
 
 # ── PKT timezone ───────────────────────────────────────────
 PKT = pytz_timezone("Asia/Karachi")
 
 # ── Regional source filter ─────────────────────────────────
-def _get_sources_for_focus(focus: str) -> List[str]:
+def _get_sources_for_focus(focus: str) -> list[str]:
     source_map = {
         "asia":     config.content.asia_sources,
         "mideast":  config.content.mideast_sources,
@@ -65,14 +64,38 @@ def _get_sources_for_focus(focus: str) -> List[str]:
 
 # ── Tiered minimum-score check ─────────────────────────────
 def _passes_min_score(show, story) -> bool:
-    """Apply show.min_score, with a stricter floor (min_score_tier3)
-    for Tier 3 sources if one is configured."""
+    """Apply show.min_score, with a stricter floor (min_score_tier4)
+    for Tier 4 (eyewitness/social/user-submitted) sources if one is
+    configured — see agents/verification_agent.py's five-tier source
+    reliability model.
+
+    For the breaking show specifically, a story also qualifies if it
+    clears the real-world impact bar (compute_impact_score) even when its
+    engagement score doesn't — engagement is a popularity proxy, not
+    newsworthiness, and a significant story (mass casualties, a head of
+    state acting, war, major policy consequence) can be breaking before
+    it has picked up any online engagement at all."""
     threshold = show.min_score
-    if show.min_score_tier3 is not None:
-        from agents.verification_agent import TIER_3_SOURCES
-        if story.raw.source_name in TIER_3_SOURCES:
-            threshold = show.min_score_tier3
-    return story.raw.score >= threshold
+    if show.min_score_tier4 is not None:
+        from agents.verification_agent import TIER_4_SOURCES
+        if story.raw.source_name in TIER_4_SOURCES:
+            threshold = show.min_score_tier4
+
+    if story.raw.score >= threshold:
+        return True
+
+    if show.is_breaking:
+        from agents.verification_agent import compute_impact_score
+        impact = compute_impact_score(story.raw)
+        if impact >= config.content.min_impact_score:
+            logger.debug(
+                f"Breaking eligibility via impact score ({impact}) — "
+                f"engagement score {story.raw.score} below threshold {threshold}: "
+                f"{story.raw.title[:60]}"
+            )
+            return True
+
+    return False
 
 # ── Single broadcast ───────────────────────────────────────
 def run_broadcast(show_id: str) -> bool:
@@ -97,8 +120,13 @@ def run_broadcast(show_id: str) -> bool:
                 show.regional_focus
             )
 
+        # A heavy-news-day story that dominates cross-source confirmation
+        # (one event covered by 20+ outlets) can otherwise fill a small
+        # limit entirely, before agents.planning_agent's diversity pass
+        # ever sees a lower-scoring story from an underrepresented region
+        # — 200 keeps effectively the whole fresh pool in play for that.
         fresh = get_fresh_stories(
-            limit          = 50,
+            limit          = 200,
             min_confidence = config.content.min_confidence_score,
             source_names   = source_names,
             max_age_hours  = max(1, show.lookback_minutes // 60),
@@ -116,13 +144,28 @@ def run_broadcast(show_id: str) -> bool:
                 "DB empty or all stories broadcast — "
                 "falling back to live scraping"
             )
+            from agents.news_api_agent import run_news_api_agent
             from agents.trend_detection_agent import run_trend_detection
             from agents.verification_agent import run_verification
-            stories  = run_trend_detection()
-            verified = run_verification(stories)
+            from core.models import VerificationStatus
+            stories = run_trend_detection() + run_news_api_agent()
+            verified = run_verification(stories)  # verified + pending, see docstring
+            # Persist — without this, a story that later fails compliance
+            # or gets marked rejected has no row to update, and the exact
+            # same live-scraped top story keeps winning selection again
+            # on every subsequent run.
+            saved = save_stories(verified)
+            logger.info(f"       Saved {saved} newly-scraped stories to DB")
+            # This live-scrape path skips the DB round-trip (and with it
+            # get_fresh_stories' lower 0.5-confidence floor for 'pending'
+            # stories), so it requires full verification directly — a
+            # 'pending' story from this pool has to wait for the DB-driven
+            # path next run, same as it would if it had come from any
+            # other scrape.
             fresh    = [
                 s for s in verified
-                if s.raw.id not in broadcast_history
+                if s.status == VerificationStatus.VERIFIED
+                and s.raw.id not in broadcast_history
             ]
 
         if not fresh:
@@ -144,7 +187,14 @@ def run_broadcast(show_id: str) -> bool:
         if scored:
             fresh = scored
 
-        top_stories = fresh[:show.story_count]
+        if show.is_breaking or len(fresh) <= show.story_count:
+            # Breaking is latency-critical (zero analysis, zero
+            # judgment by design) — always take the deterministic
+            # score-ordered slice, never the Planning Agent.
+            top_stories = fresh[:show.story_count]
+        else:
+            from agents.planning_agent import run_planning_agent
+            top_stories = run_planning_agent(fresh, show)
         logger.info(
             f"       Top: {top_stories[0].raw.title[:55]}"
         )
@@ -158,15 +208,64 @@ def run_broadcast(show_id: str) -> bool:
             f"| ~{script.duration_secs}s"
         )
 
-        # ── Step 3: Avatar ─────────────────────────────────
-        logger.info("[3/6] Rendering avatar video...")
-        from agents.avatar_agent import run_avatar_agent
+        # ── Editorial Review — house style lint, informational only ─
+        from agents.style_agent import run_style_agent
+        run_style_agent(script)
+
+        # ── Legal / Ethics Review — PEMRA/defamation gate, mandatory
+        # on every broadcast (this runs 24/7 unattended, so there's no
+        # human editor to decide "if needed" — every script gets it) ─
+        from agents.compliance_agent import run_compliance_agent
+        compliance = run_compliance_agent(script, top_stories[0])
+        if not compliance.passed:
+            logger.error(
+                f"Compliance check FAILED [{show_id}] — "
+                f"risk={compliance.risk_level}: "
+                f"{'; '.join(compliance.issues) or 'no details'} — "
+                "aborting broadcast"
+            )
+            # Exclude these stories from future selection — otherwise the
+            # same story/script combination keeps winning top-story
+            # selection and re-failing compliance on every subsequent run
+            # (get_fresh_stories only returns status='verified' stories).
+            from core.database import mark_rejected
+            for s in top_stories:
+                mark_rejected(s.raw.id)
+            return False
+
+        # ── Step 3: Video ───────────────────────────────────
+        logger.info("[3/6] Composing broadcast video...")
         from core.models import VideoStatus
-        video = run_avatar_agent(script)
-        logger.info(f"       Status: {video.status}")
+
+        # BroadcastOS (broadcast_os/orchestrator.py) is the new primary
+        # pipeline — agent-directed scene composition (story planner,
+        # visual director, asset discovery, per-scene narration). Falls
+        # back to video_composer, then avatar_agent, so a BroadcastOS
+        # failure never blocks a broadcast (zero downtime).
+        video = None
+        try:
+            from broadcast_os.orchestrator import BroadcastOrchestrator
+            video = BroadcastOrchestrator().produce_broadcast(
+                top_stories[0], script, show_id, stories=top_stories,
+            )
+            logger.info(f"       Pipeline: BroadcastOS | Status: {video.status}")
+        except Exception as e:
+            logger.warning(f"BroadcastOS failed: {e} — falling back to video_composer")
+            video = None
+
+        if video is None or video.status == VideoStatus.FAILED:
+            from video.video_composer import run_video_composer
+            video = run_video_composer(script, top_stories[0], show_id)
+            logger.info(f"       Pipeline: video_composer (fallback) | Status: {video.status}")
 
         if video.status == VideoStatus.FAILED:
-            logger.error("Avatar generation failed — aborting")
+            logger.warning("video_composer failed — falling back to avatar_agent")
+            from agents.avatar_agent import run_avatar_agent
+            video = run_avatar_agent(script)
+            logger.info(f"       Pipeline: avatar_agent (fallback) | Status: {video.status}")
+
+        if video.status == VideoStatus.FAILED:
+            logger.error("All video pipelines failed — aborting")
             return False
 
         # ── Step 4: Thumbnail ──────────────────────────────
@@ -220,7 +319,7 @@ def run_broadcast(show_id: str) -> bool:
 # ── Breaking news check ────────────────────────────────────
 def check_breaking_news():
     show   = config.scheduler.shows["breaking"]
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    cutoff = datetime.now(UTC) - timedelta(minutes=30)
     logger.info("Checking for breaking news...")
 
     try:
@@ -235,7 +334,7 @@ def check_breaking_news():
             if _passes_min_score(show, s)
             and s.raw.id not in broadcast_history
             and (
-                s.raw.published_at.replace(tzinfo=timezone.utc)
+                s.raw.published_at.replace(tzinfo=UTC)
                 if s.raw.published_at.tzinfo is None
                 else s.raw.published_at
             ) >= cutoff
@@ -268,6 +367,14 @@ def run_db_cleanup():
     from core.database import cleanup_old_stories
     deleted = cleanup_old_stories(days=30)
     logger.info(f"DB cleanup done — {deleted} stories removed")
+
+# ── Daily performance check ─────────────────────────────────
+def run_performance_check():
+    """Pull YouTube stats for the last week's real uploads."""
+    logger.info("Running Performance Agent...")
+    from agents.performance_agent import run_performance_agent
+    updated = run_performance_agent(days=7)
+    logger.info(f"Performance check done — {updated} videos updated")
 
 # ── Setup APScheduler ──────────────────────────────────────
 def setup_scheduler() -> BlockingScheduler:
@@ -337,8 +444,8 @@ def setup_scheduler() -> BlockingScheduler:
         coalesce      = True,
     )
     logger.info(
-        f"Scheduled: WNX24 Week in Review               "
-        f"20:00 PKT (Sunday)"
+        "Scheduled: WNX24 Week in Review               "
+        "20:00 PKT (Sunday)"
     )
 
     # Breaking news — every 5 minutes
@@ -385,6 +492,21 @@ def setup_scheduler() -> BlockingScheduler:
         coalesce      = True,
     )
     logger.info("Scheduled: DB Cleanup — 1st of month 02:00 PKT")
+
+    # Performance check — daily during quiet hours
+    scheduler.add_job(
+        run_performance_check,
+        CronTrigger(
+            hour     = 4,
+            minute   = 0,
+            timezone = PKT,
+        ),
+        id            = "performance_check",
+        name          = "Performance Agent",
+        max_instances = 1,
+        coalesce      = True,
+    )
+    logger.info("Scheduled: Performance Check — 04:00 PKT daily")
 
     return scheduler
 

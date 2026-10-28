@@ -1,13 +1,13 @@
 
-import os
 import time
-from typing import List, Tuple
-from datetime import datetime, timezone, timedelta
-from loguru import logger
-from groq import Groq
+from datetime import UTC, datetime, timedelta
 
+from groq import Groq
+from loguru import logger
+
+from agents.editorial_standards import render_pemra_block, render_principles_block
+from config.settings import ShowConfig, config
 from core.models import VerifiedStory, VideoScript
-from config.settings import config, ShowConfig
 
 
 def is_developing_story(story: VerifiedStory, hours: int = 2) -> bool:
@@ -15,38 +15,46 @@ def is_developing_story(story: VerifiedStory, hours: int = 2) -> bool:
     try:
         pub = story.raw.published_at
         if pub.tzinfo is None:
-            pub = pub.replace(tzinfo=timezone.utc)
-        return pub >= datetime.now(timezone.utc) - timedelta(hours=hours)
+            pub = pub.replace(tzinfo=UTC)
+        return pub >= datetime.now(UTC) - timedelta(hours=hours)
     except Exception:
         return False
 
 client = Groq(api_key=config.api.groq_api_key)
-MODEL  = "llama-3.3-70b-versatile"  # mixtral decommissioned; 70b versatile is Groq's recommended replacement
+MODEL  = "openai/gpt-oss-120b"  # llama-3.3-70b-versatile decommissioned on Groq; gpt-oss-120b is the current flagship replacement
 
 def _call_groq_with_retry(
     messages: list,
     max_tokens: int = 2000,
     temperature: float = 0.7,
     max_retries: int = 3,
+    min_words: int = 30,
 ) -> str:
     """
     Call Groq API with exponential backoff retry.
     Retries on rate limit, timeout, or empty response.
+
+    `min_words` guards against truncated/empty completions for
+    long-form generation (scripts). Callers doing short-text tasks
+    (e.g. translating a one-line hook) should pass a lower floor —
+    the default of 30 assumes broadcast-script-length output.
     """
     delays = [5, 15, 30]   # seconds between retries
 
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
-                model       = MODEL,
-                messages    = messages,
-                temperature = temperature,
-                max_tokens  = max_tokens,
+                model            = MODEL,
+                messages         = messages,
+                temperature      = temperature,
+                max_tokens       = max_tokens,
+                reasoning_effort = "low",  # gpt-oss burns completion tokens on hidden reasoning by default,
+                                           # which starved short-budget calls (e.g. compliance) of any visible content
             )
             content = response.choices[0].message.content
 
             # Reject if response is too short
-            if not content or len(content.split()) < 30:
+            if not content or len(content.split()) < min_words:
                 raise ValueError(
                     f"Response too short: {len(content.split())} words"
                 )
@@ -87,7 +95,7 @@ def _sign_off_line(show: ShowConfig) -> str:
     return f'"This was {show.name} on WNX24."'
 
 
-def _format_stories_block(stories: List[VerifiedStory]) -> str:
+def _format_stories_block(stories: list[VerifiedStory]) -> str:
     blocks = []
     for i, s in enumerate(stories, 1):
         blocks.append(
@@ -142,7 +150,7 @@ _REGION_KEYWORDS = {
 }
 
 
-def _analyse_story_impact(stories: List[VerifiedStory]) -> dict:
+def _analyse_story_impact(stories: list[VerifiedStory]) -> dict:
     """Keyword-scan story titles/summaries for likely impact areas and
     regions referenced, to give the LLM a genuine starting point."""
     combined = " ".join(
@@ -165,8 +173,23 @@ def _analyse_story_impact(stories: List[VerifiedStory]) -> dict:
 
 
 # ── Universal newsroom rules shared by every builder ────────
-_UNIVERSAL_RULES = """
-NEWSROOM STANDARDS (BBC / Reuters / AP / Al Jazeera / NPR):
+_UNIVERSAL_RULES = f"""
+JOURNALISM PRINCIPLES — every script must uphold these:
+{render_principles_block()}
+
+CURRENT-DATE WARNING: today is {datetime.now(UTC).strftime("%d %B %Y")}.
+Your own training data has an earlier cutoff, so your built-in
+assumptions about who currently holds a given political office,
+military rank, or other title are very likely stale by now — never
+override the scraped source material with your own prior knowledge of
+who "used to" or "used to not" hold a role. Always defer to how the
+STORY text below actually refers to a person's current title (e.g. if
+the story calls someone "President X", report them as the current
+President — never silently correct it to "former President" from your
+own memory, and never do the reverse either).
+
+NEWSROOM STANDARDS (BBC / Reuters / AP / Al Jazeera / NPR) — how the
+principles above translate into concrete writing rules:
 — Active voice always: "troops crossed", not "the border was crossed".
 — Strong verbs over adjectives: "fell", not "dramatically collapsed".
 — Specific numbers always: "47 killed", not "dozens killed".
@@ -177,6 +200,23 @@ NEWSROOM STANDARDS (BBC / Reuters / AP / Al Jazeera / NPR):
 — Never use: claims, admits, slammed, bombshell, shocking,
   dramatic, devastating. Use "says" or "acknowledges" instead
   of "admits", "criticised" instead of "slammed".
+— Effects, stakes and consequences belong in the story — a real
+  bulletin doesn't skip them — but they must read as one
+  continuous sentence with the facts, not a separate callout.
+  WRONG (abrupt, flagged, unattributed): "...the budget was
+  approved. Impact: this could affect millions of households."
+  RIGHT (one continuous, attributed sentence): "...the budget
+  was approved, a change the finance ministry says will affect
+  millions of households." Never announce the shift into
+  consequence/analysis with words like "impact", "significance",
+  or "why this matters" — just keep narrating the same story.
+  When a named analyst, official or institution has actually
+  said something about the effects, include it as an attributed
+  statement ("Analysts at X say..." / "The ministry says...") —
+  that is real reporting. When no one has said it, do not invent
+  it — an anchor's own unattributed guess about consequences
+  ("this could cause serious damage") is not something a real
+  newsroom airs.
 — Unconfirmed information must say "unconfirmed reports suggest".
 — Never take sides on any political, social or religious issue.
   Present all perspectives factually. Aria has no personal
@@ -187,18 +227,10 @@ NEWSROOM STANDARDS (BBC / Reuters / AP / Al Jazeera / NPR):
 — Allegations not verdicts: "accused of", never "guilty of".
   Use "alleged" for unproven claims. "He has been charged
   with" — never "the criminal".
+— Never write anything that promotes a product, company or
+  commercial interest — editorial content only.
 — PEMRA compliance for Pakistan-related content:
-  — Military and judiciary: facts plus attribution only —
-    "According to ISPR, troops were deployed" — never imply
-    criticism.
-  — Religion: factual reporting only — report what officials
-    or experts say, never an opinion on any religion.
-  — Pakistan court cases: objective facts only — "The court
-    heard arguments today" — never comment on the merits.
-  — Banned organisations: report events, not their stated
-    reasons — "An attack occurred in Peshawar".
-  — Nothing that could incite violence, sectarian hatred or
-    discrimination against any group in Pakistan.
+{render_pemra_block()}
 — British spelling throughout."""
 
 
@@ -273,7 +305,7 @@ def parse_script(raw: str, story_id: str,
     if not full_text:
         logger.warning("parse_script: no section markers found — using raw text")
         full_text = raw.strip()
-        lines     = [l.strip() for l in raw.splitlines() if l.strip()]
+        lines     = [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
         # First non-empty line → hook (strip any label prefix)
         hook = _strip_label(lines[0])[:120] if lines else "Breaking News"
@@ -338,9 +370,12 @@ _BREAKING_SYSTEM = (
     + _MARKER_INSTRUCTION.format(markers="[HOOK], [OPEN], [FLASH], [SIGN_OFF]")
 )
 
-def build_breaking_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_breaking_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     story = stories[0]
     anchor_open = _anchor_open(show)
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
 
     user = f"""Write a BREAKING NEWS flash for Aria to read on air.
 
@@ -351,6 +386,7 @@ STORY:
 Title:   {story.raw.title}
 Source:  {story.raw.source_name}
 Summary: {story.raw.summary}
+{research_block}
 {_UNIVERSAL_RULES}
 
 BREAKING NEWS RULES:
@@ -383,18 +419,21 @@ next. Facts only. One attribution.
 _BULLETIN_SYSTEM = (
     "You are a BBC broadcast journalist at WNX24. "
     "Clear, factual, professional. Inverted pyramid always — "
-    "most important fact first. Facts before analysis. "
-    "One brief impact line per story — never deep analysis; "
-    "save deep analysis for Deep Dive and Prime Time. "
+    "most important fact first. Report what happened, attributed "
+    "and factual — never a separate analysis or 'why this matters' "
+    "aside; save deep analysis for Deep Dive and Prime Time. "
     + _MARKER_INSTRUCTION.format(
-        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [WHY_IT_MATTERS], [SIGN_OFF]"
+        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [SIGN_OFF]"
     )
 )
 
-def build_bulletin_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_bulletin_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     word_target  = _word_target(show)
     anchor_open  = _anchor_open(show)
     stories_text = _format_stories_block(stories)
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
 
     user = f"""Write a {show.name} script covering {len(stories)} stories.
 
@@ -404,21 +443,23 @@ SIGN OFF:  "{config.anchor.sign_off}"
 TARGET:    {word_target} words minimum ({show.video_duration} seconds)
 
 {stories_text}
+{research_block}
 {_UNIVERSAL_RULES}
 
 BULLETIN RULES:
 — Inverted pyramid: lead with the most important story.
-— ONE brief impact sentence per story — that is all.
+— Report the facts of each story — nothing more. Any real-world
+  relevance (who it affects, what happens next) belongs as one
+  attributed factual clause inside that story's own paragraph,
+  exactly like an anchor reads it on air — never a separate
+  editorial statement, and never phrased as "this matters
+  because" or a standalone consequence.
 — Use meaningful transitions that show connection between
   stories:
   "This connects directly to..."
-  "As a consequence..."
-  "Meanwhile the same pressure is driving..."
+  "Meanwhile, in a separate development..."
+  "Elsewhere today..."
   Never use "In other news" or "Moving on".
-— Genuine impact only — never force a regional angle.
-  If a story affects Europe only, say Europe.
-  If it affects global markets, say so.
-  Be honest about who it actually affects.
 — Maximum 20 words per sentence.
 
 FORMAT:
@@ -432,16 +473,10 @@ Use exactly: "{anchor_open}"
 [WHAT_HAPPENED]
 Cover each story in turn, most important first.
 — Begin each story with "According to [source name],"
-— One fact-led paragraph per story plus its one impact sentence.
+— One fact-led paragraph per story. Where genuinely relevant,
+  end that paragraph with one attributed factual clause on who
+  it affects — not a forced or speculative one.
 — Use the transition phrases above between stories.
-
-[WHY_IT_MATTERS]
-REQUIREMENT: Minimum 60 words. ONE unified analysis covering
-ALL stories together — not separate sections per story.
-WHO is affected beyond the headlines?
-WHERE does today's combination of stories ripple?
-WHEN do the combined impacts land — today, this week, longer term?
-Genuine impact only — do not force a regional angle.
 
 [SIGN_OFF]
 "{config.anchor.sign_off}"
@@ -460,14 +495,17 @@ _PAKISTAN_SYSTEM = (
     "angle where none exists. Strict PEMRA compliance on "
     "military, judiciary and religion. "
     + _MARKER_INSTRUCTION.format(
-        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [WHY_IT_MATTERS], [SIGN_OFF]"
+        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [SIGN_OFF]"
     )
 )
 
-def build_pakistan_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_pakistan_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     word_target  = _word_target(show)
     anchor_open  = _anchor_open(show)
     stories_text = _format_stories_block(stories)
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
 
     user = f"""Write the {show.name} script covering {len(stories)} stories
 for a Pakistani audience.
@@ -478,6 +516,7 @@ SIGN OFF:  "{config.anchor.sign_off}"
 TARGET:    {word_target} words minimum ({show.video_duration} seconds)
 
 {stories_text}
+{research_block}
 {_UNIVERSAL_RULES}
 
 PAKISTAN DESK RULES:
@@ -502,12 +541,10 @@ Use exactly: "{anchor_open}"
 
 [WHAT_HAPPENED]
 Pakistan stories first, then regional stories affecting
-Pakistan. Attribution for every claim.
-
-[WHY_IT_MATTERS]
-REQUIREMENT: Minimum 60 words. The real effect on Pakistani
-citizens — economy, security, daily life. Only draw this
-connection where it is genuine.
+Pakistan. Attribution for every claim. Where the real effect on
+Pakistani citizens — economy, security, daily life — is genuine,
+fold one attributed factual clause into that story's own
+paragraph; never a separate editorial aside.
 
 [SIGN_OFF]
 "{config.anchor.sign_off}"
@@ -528,7 +565,9 @@ _ANALYSIS_SYSTEM = (
     )
 )
 
-def build_analysis_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_analysis_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     word_target  = _word_target(show)
     anchor_open  = _anchor_open(show)
     stories_text = _format_stories_block(stories)
@@ -545,6 +584,8 @@ def build_analysis_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tup
         "relevance before drawing any connection."
     )
 
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
+
     user = f"""Write a {show.name} script covering {len(stories)} stories.
 
 ANCHOR:    {config.anchor.name}
@@ -555,6 +596,7 @@ TARGET:    {word_target} words minimum ({show.video_duration} seconds)
 {stories_text}
 
 {impact_line}
+{research_block}
 {_UNIVERSAL_RULES}
 
 ANALYSIS RULES:
@@ -623,10 +665,13 @@ _EXPLAINER_SYSTEM = (
     )
 )
 
-def build_explainer_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_explainer_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     story       = stories[0]
     word_target = _word_target(show)
     anchor_open = _anchor_open(show)
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
 
     user = f"""Write an EXPLAINER script for Aria — an educational segment
 that explains ONE story or concept simply.
@@ -640,6 +685,7 @@ STORY:
 Title:   {story.raw.title}
 Source:  {story.raw.source_name}
 Summary: {story.raw.summary}
+{research_block}
 {_UNIVERSAL_RULES}
 
 EXPLAINER RULES:
@@ -700,9 +746,9 @@ _REGIONAL_SYSTEM_PROMPTS = {
 
 _REGIONAL_EXTRA_RULES = {
     "health": (
-        "— Never alarmist — always evidence-based. End "
-        "WHY_IT_MATTERS by noting viewers with health concerns "
-        "should consult a qualified medical professional.\n"
+        "— Never alarmist — always evidence-based. Close with a "
+        "factual note that viewers with health concerns should "
+        "consult a qualified medical professional.\n"
     ),
     "conflict": (
         '— Use passive language for all casualties: "lives '
@@ -711,16 +757,19 @@ _REGIONAL_EXTRA_RULES = {
     ),
 }
 
-def build_regional_prompt(stories: List[VerifiedStory], show: ShowConfig) -> Tuple[str, str]:
+def build_regional_prompt(
+    stories: list[VerifiedStory], show: ShowConfig, research_brief: str = ""
+) -> tuple[str, str]:
     word_target  = _word_target(show)
     anchor_open  = _anchor_open(show)
     stories_text = _format_stories_block(stories)
+    research_block = f"\nRESEARCH BRIEF (background only — do not repeat verbatim):\n{research_brief}\n" if research_brief else ""
 
     base_system = _REGIONAL_SYSTEM_PROMPTS.get(
         show.id, "You are a WNX24 specialist correspondent."
     )
     system = base_system + " " + _MARKER_INSTRUCTION.format(
-        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [WHY_IT_MATTERS], [SIGN_OFF]"
+        markers="[HOOK], [OPEN], [WHAT_HAPPENED], [SIGN_OFF]"
     )
 
     extra_rules = _REGIONAL_EXTRA_RULES.get(show.id, "")
@@ -733,14 +782,13 @@ SIGN OFF:  "{config.anchor.sign_off}"
 TARGET:    {word_target} words minimum ({show.video_duration} seconds)
 
 {stories_text}
+{research_block}
 {_UNIVERSAL_RULES}
 
 REGIONAL DESK RULES:
 — Facts relevant to this region or sector only — save global
   analysis for Deep Dive.
-{extra_rules}— ONE WHY_IT_MATTERS — genuine regional or sector
-  significance, never forced.
-— Maximum 20 words per sentence.
+{extra_rules}— Maximum 20 words per sentence.
 
 FORMAT:
 
@@ -752,11 +800,9 @@ Use exactly: "{anchor_open}"
 
 [WHAT_HAPPENED]
 Facts first, source attributed, active voice — cover each
-story in turn.
-
-[WHY_IT_MATTERS]
-REQUIREMENT: Minimum 60 words. Genuine regional or sector
-significance — never forced global analysis.
+story in turn. Where genuine regional or sector significance
+exists, fold one attributed factual clause into that story's
+own paragraph — never a separate analysis section, never forced.
 
 [SIGN_OFF]
 "{config.anchor.sign_off}"
@@ -792,7 +838,7 @@ PROMPT_BUILDERS = {
 
 # ── Main agent function ────────────────────────────────────
 def run_script_writer(
-    stories: List[VerifiedStory],
+    stories: list[VerifiedStory],
     show: ShowConfig
 ) -> VideoScript:
 
@@ -812,7 +858,21 @@ def run_script_writer(
         f"({len(selected)} story{'s' if len(selected) != 1 else ''})"
     )
 
-    system_content, user_content = builder(selected, show)
+    # Evidence Collection — every show gets a research brief on the
+    # lead story before writing, matching the collect-and-publish flow
+    # (Cross Verification -> Evidence Collection -> Editorial Review).
+    # Each builder treats it as background only, never a mandate to
+    # include it verbatim — breaking/bulletin's "zero analysis" rules
+    # still govern their output. Never let a research failure block
+    # script generation.
+    research_brief = ""
+    try:
+        from agents.research_agent import run_research_agent
+        research_brief = run_research_agent(selected[0])
+    except Exception as e:
+        logger.warning(f"Research Agent failed, continuing without brief: {e}")
+
+    system_content, user_content = builder(selected, show, research_brief=research_brief)
     messages = [
         {"role": "system", "content": system_content},
         {"role": "user",   "content": user_content},

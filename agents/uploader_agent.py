@@ -1,15 +1,19 @@
-import os
+"""agents/uploader_agent.py — Publishing Agent.
+
+Deterministic API-call agent (no LLM reasoning involved) — per
+https://agentfactory.panaversity.org/'s Gate 1a, uploading via the
+YouTube Data API and applying a fixed video-retention policy is
+"one exact step that is the same every time," not agent work.
+"""
 import json
-import time
-from datetime import datetime, timezone
+import os
+from datetime import UTC, datetime
+
 from loguru import logger
-from typing import Optional
 
-from core.models import VideoPackage, VideoStatus
-from config.settings import config, ShowConfig
-
-# ── YouTube category IDs ───────────────────────────────────
-CATEGORY_ID = "25"   # 25 = News & Politics on YouTube
+from agents.seo_agent import build_metadata
+from config.settings import ShowConfig, config
+from core.models import VideoPackage
 
 # ── Video retention policy ──────────────────────────────────
 # Shows to NEVER delete — permanent content
@@ -32,110 +36,58 @@ CLEAN_AFTER_DAYS = {
     "world_affairs": 3,
 }
 
-# ── Auto-generate YouTube timestamp chapters ───────────────
-def build_chapters(script, show) -> str:
-    wpm = config.content.words_per_minute
 
-    def words_to_time(words: int) -> str:
-        secs = int((words / wpm) * 60)
-        mins = secs // 60
-        secs = secs % 60
-        return f"{mins}:{secs:02d}"
+# ── Shared authenticated YouTube client ─────────────────────
+def get_youtube_client():
+    """Build an authenticated YouTube Data API v3 client from the saved
+    OAuth token, refreshing and persisting it if expired. Returns None
+    if no valid/refreshable token exists — callers (cleanup_old_videos,
+    agents/performance_agent.py) should skip gracefully rather than
+    launch an interactive browser flow; see reauthorize() for that."""
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError as e:
+        logger.error(f"Google API import failed: {e}")
+        return None
 
-    chapters = ["0:00 Introduction"]
-    offset   = 15   # words for hook + open
+    SCOPES     = ["https://www.googleapis.com/auth/youtube.upload",
+                  "https://www.googleapis.com/auth/youtube"]
+    TOKEN_FILE = "config/youtube_token.json"
 
-    if script.what_happened:
-        chapters.append(f"{words_to_time(offset)} What Happened")
-        offset += len(script.what_happened.split())
+    if not os.path.exists(TOKEN_FILE):
+        return None
 
-    if script.why_it_matters:
-        chapters.append(f"{words_to_time(offset)} Why It Matters")
-        offset += len(script.why_it_matters.split())
+    try:
+        with open(TOKEN_FILE) as f:
+            creds = Credentials.from_authorized_user_info(json.load(f), SCOPES)
+    except Exception as e:
+        logger.warning(f"Could not load YouTube token: {e}")
+        return None
 
-    if script.expert_insight:
-        chapters.append(f"{words_to_time(offset)} Analysis")
-        offset += len(script.expert_insight.split())
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                with open(TOKEN_FILE, "w") as f:
+                    json.dump(json.loads(creds.to_json()), f, indent=2)
+            except Exception as e:
+                logger.warning(f"YouTube token refresh failed: {e}")
+                return None
+        else:
+            return None
 
-    chapters.append(f"{words_to_time(offset)} Sign Off")
-
-    return "\n".join(chapters)
-
-# ── Generate video metadata ────────────────────────────────
-def build_metadata(package: VideoPackage, show: ShowConfig = None) -> dict:
-    story  = package.story.raw
-    script = package.script
-
-    # Title — SEO optimised (strip any LLM-inserted "Hook:" prefix)
-    hook_text = script.hook
-    for prefix in ("hook:", "open:", "breaking:"):
-        if hook_text.lower().startswith(prefix):
-            hook_text = hook_text[len(prefix):].strip()
-            break
-    title = f"{hook_text[:60]} | WNX24"
-    if len(title) > 100:
-        title = title[:97] + "..."
-
-    # Description — structured for YouTube SEO
-    chapters = build_chapters(script, show)
-
-    description = f"""🤖 AI-Generated Content: This video uses AI avatar and AI script generation technology.
-
-{script.hook}
-
-{script.what_happened}
-
-{script.why_it_matters}
-
-{chapters}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🌐 WNX24
-"{config.channel.tagline}"
-
-Covering AI, Cybersecurity, and Global Technology News
-from Pakistan, the Middle East, Asia, and the World.
-
-📌 Source: {story.source_name}
-🔗 Original: {story.url}
-📅 {datetime.now().strftime("%d %B %Y  |  %H:%M PKT")}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-#WNX24 #AINews #TechNews #CyberSecurity
-#BreakingNews #ArtificialIntelligence #GlobalNews
-#PakistanNews #MiddleEast #AsiaNews #TechToday
-#WorldNews #AIGeneratedContent #NewsAI
-"""
-
-    # Tags — SEO keywords
-    tags = [
-        "WNX24",
-        "AI news", "artificial intelligence",
-        "tech news today", "cybersecurity news",
-        "breaking news", "global news",
-        "Pakistan news", "Middle East news",
-        "Asia tech news", "machine learning",
-        "OpenAI", "technology news",
-        story.source_name,
-    ] + list(package.story.raw.keywords)[:5]
-
-    return {
-        "title":       title[:100],
-        "description": description,
-        "tags":        tags[:500],          # YouTube max 500 chars total
-        "categoryId":  CATEGORY_ID,
-        "defaultLanguage": config.channel.language,
-        "privacyStatus": "public",
-    }
+    return build("youtube", "v3", credentials=creds)
 
 
 # ── YouTube upload via API ─────────────────────────────────
 def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
     try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
 
     except ImportError as _ie:
         logger.error(f"Google API import failed: {_ie}")
@@ -144,7 +96,6 @@ def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
     SCOPES     = ["https://www.googleapis.com/auth/youtube.upload",
                   "https://www.googleapis.com/auth/youtube"]
     TOKEN_FILE = "config/youtube_token.json"
-    OAUTH_FILE = "config/youtube_oauth.json"
     video_path = package.video.local_path
 
     if not video_path or not os.path.exists(video_path):
@@ -156,7 +107,7 @@ def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
 
     if os.path.exists(TOKEN_FILE):
         try:
-            with open(TOKEN_FILE, "r") as f:
+            with open(TOKEN_FILE) as f:
                 import json as _json
                 token_data = _json.load(f)
                 creds = Credentials.from_authorized_user_info(
@@ -181,9 +132,9 @@ def _youtube_upload(package: VideoPackage, metadata: dict) -> str:
             # let the operator re-authorise out-of-band (see
             # `python -m agents.uploader_agent --reauth`).
             logger.error(
-                f"YouTube token missing or unrefreshable — run "
-                f"'.venv/Scripts/python.exe -m agents.uploader_agent --reauth' "
-                f"to re-authorise. Falling back to mock upload."
+                "YouTube token missing or unrefreshable — run "
+                "'.venv/Scripts/python.exe -m agents.uploader_agent --reauth' "
+                "to re-authorise. Falling back to mock upload."
             )
             return _mock_upload(package, metadata)
 
@@ -337,31 +288,19 @@ def cleanup_old_videos(
     in dry-run mode).
     """
     try:
-        from googleapiclient.discovery import build
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
         from core.database import get_conn
 
-        TOKEN_FILE = "config/youtube_token.json"
-
-        if not os.path.exists(TOKEN_FILE):
-            logger.warning("No YouTube token — skipping cleanup")
+        youtube = get_youtube_client()
+        if youtube is None:
+            logger.warning("No usable YouTube token — skipping cleanup")
             return 0
-
-        with open(TOKEN_FILE) as f:
-            creds = Credentials.from_authorized_user_info(json.load(f))
-
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-
-        youtube = build("youtube", "v3", credentials=creds)
 
         channel_id = os.getenv("YOUTUBE_CHANNEL_ID", "")
         if not channel_id:
             logger.warning("No channel ID — skipping cleanup")
             return 0
 
-        now     = datetime.now(timezone.utc)
+        now     = datetime.now(UTC)
         deleted = 0
         conn    = get_conn()
 

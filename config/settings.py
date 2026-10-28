@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,15 +15,28 @@ class APIConfig:
     reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
     youtube_api_key:    str = os.getenv("YOUTUBE_API_KEY", "")
     youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
+    unsplash_access_key: str = os.getenv("UNSPLASH_ACCESS_KEY", "")
+    pexels_api_key:      str = os.getenv("PEXELS_API_KEY", "")
 
 @dataclass
 class ContentConfig:
     niche:                str   = "Global News — AI, Technology, Cybersecurity & World Affairs"
-    min_confidence_score: float = 0.75  # was 0.70
+    min_confidence_score: float = 0.65  # was 0.75 — lowered so genuinely
+    # cross-confirmed regional stories (e.g. Africa, which has fewer
+    # overlapping wire services than the US/UK/EU and so scores lower
+    # even with real confirmation) can reach "verified" and actually
+    # compete for a lineup slot, instead of one confidence formula tuned
+    # around heavy Western wire-service duplication gatekeeping every show
+    # Breaking-news impact-score floor (agents/verification_agent.py:
+    # compute_impact_score) — a story qualifies for "breaking" if it
+    # clears EITHER this real-world-impact bar OR the show's engagement
+    # min_score, so a significant story doesn't need to have gone viral
+    # first, and a merely viral story doesn't crowd out a significant one.
+    min_impact_score:     float = 0.35
     words_per_minute:     int   = 150
     lookback_hours:       int   = 24
 
-    keywords: List[str] = field(default_factory=lambda: [
+    keywords: list[str] = field(default_factory=lambda: [
         # ── AI & Technology ───────────────────────────────
         "artificial intelligence", "AI", "machine learning",
         "LLM", "GPT", "Claude", "Gemini",
@@ -80,13 +93,13 @@ class ContentConfig:
         "Sindh", "Punjab Pakistan",
     ])
 
-    excluded_keywords: List[str] = field(default_factory=lambda: [
+    excluded_keywords: list[str] = field(default_factory=lambda: [
         "celebrity gossip", "reality TV", "entertainment",
         "sports score", "Hollywood", "Bollywood",
     ])
 
     # ── Regional source groupings ─────────────────────────
-    asia_sources: List[str] = field(default_factory=lambda: [
+    asia_sources: list[str] = field(default_factory=lambda: [
         "South China Morning Post", "Nikkei Asia", "Tech in Asia",
         "Channel News Asia", "Japan Times", "Korea Herald",
         "KrASIA", "Caixin Global", "Economic Times Tech",
@@ -95,44 +108,44 @@ class ContentConfig:
         "The News Pakistan", "Tribune Pakistan",
     ])
 
-    mideast_sources: List[str] = field(default_factory=lambda: [
+    mideast_sources: list[str] = field(default_factory=lambda: [
         "Arab News Tech", "Gulf News Tech", "Khaleej Times",
         "Al Monitor", "MENAFN", "Wamda", "Al Jazeera",
         "Arab News", "Gulf News", "Middle East Eye",
         "Iran International", "Al Arabiya",
     ])
 
-    affairs_sources: List[str] = field(default_factory=lambda: [
+    affairs_sources: list[str] = field(default_factory=lambda: [
         "BBC News", "Reuters", "Associated Press",
         "Al Jazeera", "The Guardian", "Washington Post",
         "Foreign Policy", "The Economist",
     ])
 
-    economy_sources: List[str] = field(default_factory=lambda: [
+    economy_sources: list[str] = field(default_factory=lambda: [
         "Bloomberg Tech", "Reuters", "Financial Times",
         "Forbes Tech", "Wall Street Journal",
         "CNBC", "MarketWatch", "Economic Times",
     ])
 
-    science_sources: List[str] = field(default_factory=lambda: [
+    science_sources: list[str] = field(default_factory=lambda: [
         "MIT Tech Review", "Nature", "Science Daily",
         "NASA", "New Scientist", "IEEE Spectrum",
         "BBC Science", "Guardian Science",
     ])
 
-    health_sources: List[str] = field(default_factory=lambda: [
+    health_sources: list[str] = field(default_factory=lambda: [
         "WHO", "BBC Health", "Reuters Health",
         "Medical News Today", "WebMD", "STAT News",
         "The Lancet", "BMJ",
     ])
 
-    conflict_sources: List[str] = field(default_factory=lambda: [
+    conflict_sources: list[str] = field(default_factory=lambda: [
         "Al Jazeera", "BBC News", "Reuters",
         "Middle East Eye", "Defense News",
         "Jane's", "Associated Press", "AFP",
     ])
 
-    pakistan_sources: List[str] = field(default_factory=lambda: [
+    pakistan_sources: list[str] = field(default_factory=lambda: [
         "Geo News", "ARY News", "Samaa News",
         "Dawn Pakistan", "Dawn", "The News",
         "Express Tribune", "Tribune Pakistan",
@@ -147,7 +160,7 @@ class AnchorConfig:
         "trusted by audiences from Karachi to Tokyo"
     )
     sign_off: str = "Stay informed. Stay ahead. This is WNX24."
-    opens: Dict[str, str] = field(default_factory=lambda: {
+    opens: dict[str, str] = field(default_factory=lambda: {
         "breaking":     "Breaking news on WNX24.",
         "morning":      "Good morning. This is WNX24.",
         "world_affairs":"Welcome to World Affairs on WNX24.",
@@ -175,14 +188,14 @@ class ShowConfig:
     name:               str
     anchor_open:        str            # key into AnchorConfig.opens
     video_duration:     int            # seconds
-    schedule_pkt:       List[int] = field(default_factory=list)   # UTC+5 hours
+    schedule_pkt:       list[int] = field(default_factory=list)   # UTC+5 hours
     interval_minutes:   int  = 1440   # how often this show repeats
     lookback_minutes:   int  = 240    # how far back to search for stories
     story_count:        int  = 1
     is_breaking:        bool = False
     regional_focus:     str  = "global"
     min_score:          float = 0.0
-    min_score_tier3:    Optional[float] = None  # stricter floor for Tier 3 sources
+    min_score_tier4:    float | None = None  # stricter floor for Tier 4 (eyewitness/social) sources
 
 @dataclass
 class ChannelConfig:
@@ -200,14 +213,14 @@ class ChannelConfig:
 
 @dataclass
 class SchedulerConfig:
-    shows: Dict[str, ShowConfig] = field(default_factory=lambda: {
+    shows: dict[str, ShowConfig] = field(default_factory=lambda: {
 
         "breaking": ShowConfig(
             id="breaking", name="Breaking News",
             anchor_open="breaking", schedule_pkt=[],
             interval_minutes=30, lookback_minutes=30,
             video_duration=60, story_count=1,
-            min_score=50.0, min_score_tier3=75.0, is_breaking=True,
+            min_score=50.0, min_score_tier4=75.0, is_breaking=True,
         ),
 
         "morning": ShowConfig(
