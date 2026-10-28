@@ -1,180 +1,28 @@
+"""agents/avatar_agent.py — Avatar Agent (fallback video pipeline).
+
+Deterministic pipeline (no LLM reasoning involved) — per
+https://agentfactory.panaversity.org/'s Gate 1a, generating narration
+via edge-tts and assembling a fixed sequence of ffmpeg calls is "one
+exact step that is the same every time," not agent work. Used only
+when video_composer.run_video_composer (the primary pipeline) fails;
+see orchestrator.py's fallback in run_broadcast(). Delegates TTS to
+voice_agent.text_to_speech instead of keeping its own copy of the
+lock/retry logic.
+"""
 import os
-import asyncio
-import textwrap
 import uuid
 from pathlib import Path
+
 from loguru import logger
 
-from core.models import VideoScript, AvatarVideo, VideoStatus
+from agents.voice_agent import DEFAULT_VOICE, text_to_speech
 from config.settings import config
-
-# ── Directories ────────────────────────────────────────────
-ASSETS_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "assets"
-FONTS_DIR  = ASSETS_DIR / "fonts"
-FONT_BOLD  = str(FONTS_DIR / "DejaVuSansMono-Bold.ttf")
-FONT_REG   = str(FONTS_DIR / "DejaVuSansMono.ttf")
+from core.models import AvatarVideo, VideoScript, VideoStatus
+from video import video_editor
+from video.heygen_client import heygen
 
 # ── Edge-TTS voice ─────────────────────────────────────────
-TTS_VOICE  = os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural")   # free Microsoft neural voice
-
-# ── Colour palette ─────────────────────────────────────────
-BG_COLOUR      = (10,  12,  40)   # dark navy
-ACCENT_COLOUR  = (220, 50,  50)   # red ticker
-TEXT_COLOUR    = (240, 240, 240)  # near-white
-TICKER_COLOUR  = (255, 200,  40)  # gold headline
-
-
-# ── Step 1: Text → speech (edge-tts, fully free) ──────────
-async def _tts_async(text: str, out_path: str) -> None:
-    import edge_tts
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
-    await communicate.save(out_path)
-
-
-_TTS_LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "output", "tts.lock")
-
-
-def _acquire_tts_lock(timeout: int = 120) -> None:
-    """Busy-wait until no other process holds the TTS lock file."""
-    import time as _time
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
-        try:
-            fd = os.open(_TTS_LOCK_FILE,
-                         os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            return                          # lock acquired
-        except FileExistsError:
-            _time.sleep(0.5)               # another process holds it
-    raise RuntimeError("Could not acquire TTS lock after timeout")
-
-
-def _release_tts_lock() -> None:
-    try:
-        os.remove(_TTS_LOCK_FILE)
-    except FileNotFoundError:
-        pass
-
-
-def _text_to_speech(text: str, out_path: str, retries: int = 3) -> None:
-    import time as _time
-
-    _acquire_tts_lock()
-    try:
-        for attempt in range(1, retries + 1):
-            try:
-                asyncio.run(_tts_async(text, out_path))
-                if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
-                    logger.info(f"TTS saved → {out_path} ({os.path.getsize(out_path)} bytes)")
-                    return
-                logger.warning(f"TTS attempt {attempt}: empty file, retrying...")
-            except Exception as e:
-                logger.warning(f"TTS attempt {attempt} error: {e}")
-            _time.sleep(3 * attempt)
-        raise RuntimeError(f"TTS failed after {retries} attempts")
-    finally:
-        _release_tts_lock()
-
-
-# ── Step 2: Build news-anchor frame with Pillow ────────────
-def _build_frame(headline: str, subtext: str, frame_w: int, frame_h: int) -> "Image":
-    from PIL import Image, ImageDraw, ImageFont
-
-    img  = Image.new("RGB", (frame_w, frame_h), BG_COLOUR)
-    draw = ImageDraw.Draw(img)
-
-    # ── Red ticker bar at bottom ───────────────────────────
-    ticker_h = 80
-    ticker_y = frame_h - ticker_h
-    draw.rectangle([0, ticker_y, frame_w, frame_h], fill=ACCENT_COLOUR)
-
-    # "BREAKING" label
-    try:
-        label_font = ImageFont.truetype(FONT_BOLD, 28)
-    except Exception:
-        label_font = ImageFont.load_default()
-    draw.text((24, ticker_y + 24), "● BREAKING", fill=(255, 255, 255), font=label_font)
-
-    # Headline on ticker
-    try:
-        tick_font = ImageFont.truetype(FONT_BOLD, 26)
-    except Exception:
-        tick_font = ImageFont.load_default()
-    short_hl = headline[:80] + ("…" if len(headline) > 80 else "")
-    draw.text((240, ticker_y + 27), short_hl, fill=(255, 255, 230), font=tick_font)
-
-    # ── Channel name top-left ──────────────────────────────
-    try:
-        ch_font = ImageFont.truetype(FONT_BOLD, 36)
-    except Exception:
-        ch_font = ImageFont.load_default()
-    draw.text((40, 40), "MERIDIAN WORLD NEWS", fill=TICKER_COLOUR, font=ch_font)
-    draw.line([(40, 86), (frame_w - 40, 86)], fill=ACCENT_COLOUR, width=3)
-
-    # ── Anchor placeholder silhouette ─────────────────────
-    # Simple geometric anchor stand-in
-    cx, cy = frame_w // 2, frame_h // 2 - 30
-    # head
-    draw.ellipse([cx - 70, cy - 160, cx + 70, cy - 20], fill=(80, 90, 120))
-    # body
-    draw.rounded_rectangle([cx - 110, cy - 20, cx + 110, cy + 180],
-                            radius=30, fill=(60, 70, 100))
-    # podium / desk
-    draw.rectangle([cx - 220, cy + 160, cx + 220, cy + 220], fill=(40, 45, 80))
-
-    # ── Story subtext below anchor ─────────────────────────
-    try:
-        body_font = ImageFont.truetype(FONT_REG, 24)
-    except Exception:
-        body_font = ImageFont.load_default()
-
-    wrapped = textwrap.fill(subtext[:180], width=70)
-    lines   = wrapped.split("\n")
-    y_text  = cy + 240
-    for line in lines[:3]:
-        bbox = draw.textbbox((0, 0), line, font=body_font)
-        tw   = bbox[2] - bbox[0]
-        draw.text(((frame_w - tw) // 2, y_text), line,
-                  fill=TEXT_COLOUR, font=body_font)
-        y_text += 34
-
-    return img
-
-
-# ── Step 3: Image + audio → MP4 ───────────────────────────
-def _build_video(audio_path: str, headline: str, subtext: str,
-                 out_path: str, frame_w: int = 1280, frame_h: int = 720) -> None:
-    import imageio_ffmpeg
-    import os as _os
-    # Point moviepy to bundled ffmpeg so no system install is needed
-    _os.environ["FFMPEG_BINARY"] = imageio_ffmpeg.get_ffmpeg_exe()
-
-    from moviepy.editor import AudioFileClip, ImageClip
-
-    frame = _build_frame(headline, subtext, frame_w, frame_h)
-    frame_path = out_path.replace(".mp4", "_frame.png")
-    frame.save(frame_path)
-
-    audio   = AudioFileClip(audio_path)
-    clip    = ImageClip(frame_path).set_duration(audio.duration).set_audio(audio)
-    clip.write_videofile(
-        out_path,
-        fps         = 24,
-        codec       = "libx264",
-        audio_codec = "aac",
-        verbose     = False,
-        logger      = None,
-    )
-
-    # Clean up temp frame
-    try:
-        os.remove(frame_path)
-    except Exception:
-        pass
-
-    logger.info(f"Video built → {out_path} ({audio.duration:.1f}s)")
+TTS_VOICE = os.getenv("EDGE_TTS_VOICE", DEFAULT_VOICE)
 
 
 # ── Main: generate local video ─────────────────────────────
@@ -183,45 +31,77 @@ def generate_local_video(script: VideoScript) -> AvatarVideo:
     output_dir = Path(config.output_dir) / "videos"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = str(output_dir / f"{job_id}.mp3")
     video_path = str(output_dir / f"{job_id}.mp4")
 
-    # 1. TTS
-    logger.info(f"TTS — {len(script.full_text)} chars via edge-tts ({TTS_VOICE})")
+    # 1. TTS — one narration clip per script section
+    section_audio = {}
     try:
-        _text_to_speech(script.full_text, audio_path)
+        for section in video_editor.SECTION_ORDER:
+            text = (video_editor.SECTION_TEXT[section](script) or "").strip()
+            if not text:
+                continue
+            audio_path = str(output_dir / f"{job_id}_{section}.mp3")
+            logger.info(f"TTS [{section}] — {len(text)} chars via edge-tts ({TTS_VOICE})")
+            text_to_speech(text, audio_path, voice=TTS_VOICE)
+            section_audio[section] = audio_path
     except Exception as e:
         logger.error(f"TTS failed: {e}")
         return AvatarVideo(script=script, status=VideoStatus.FAILED)
 
-    # 2. Video
-    headline = script.hook or "Breaking News"
-    subtext  = script.what_happened or ""
-    logger.info("Compositing news-anchor frame + audio...")
+    if not section_audio:
+        logger.error("No narration audio generated — script sections all empty")
+        return AvatarVideo(script=script, status=VideoStatus.FAILED)
+
+    # 2. Assemble multi-scene broadcast video via FFmpeg
+    logger.info("Assembling multi-scene broadcast video...")
     try:
-        _build_video(audio_path, headline, subtext, video_path)
+        duration = video_editor.render_broadcast(script, section_audio, video_path)
     except Exception as e:
         logger.error(f"Video build failed: {e}")
         return AvatarVideo(script=script, status=VideoStatus.FAILED)
-
-    # 3. Clean up audio
-    try:
-        os.remove(audio_path)
-    except Exception:
-        pass
+    finally:
+        for audio_path in section_audio.values():
+            try:
+                os.remove(audio_path)
+            except Exception:
+                pass
 
     return AvatarVideo(
         script        = script,
         local_path    = video_path,
         heygen_job_id = job_id,
-        duration_secs = script.duration_secs,
+        duration_secs = duration,
         status        = VideoStatus.RENDERED,
     )
 
 
 # ── Main agent function ────────────────────────────────────
+# Set to True once testing is complete to use the paid HeyGen avatar.
+USE_HEYGEN = False
+
+
 def run_avatar_agent(script: VideoScript) -> AvatarVideo:
-    logger.info("Starting Avatar Agent — Meridian World News (local TTS + video)")
+    if USE_HEYGEN and config.api.heygen_api_key:
+        logger.info("Starting Avatar Agent — WNX24 (HeyGen)")
+        job_id, local_path = heygen.generate(script.full_text, script.duration_secs)
+
+        if local_path and os.path.exists(local_path):
+            logger.info(
+                f"Avatar Agent complete — "
+                f"Status: {VideoStatus.RENDERED} | "
+                f"Path: {local_path}"
+            )
+            return AvatarVideo(
+                script        = script,
+                local_path    = local_path,
+                heygen_job_id = job_id,
+                duration_secs = script.duration_secs,
+                status        = VideoStatus.RENDERED,
+            )
+
+        logger.warning("HeyGen video generation failed — falling back to local TTS + video")
+
+    logger.info("Starting Avatar Agent — WNX24 (local TTS + video)")
 
     video = generate_local_video(script)
 

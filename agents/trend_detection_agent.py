@@ -1,79 +1,155 @@
-import httpx
-import feedparser
+"""agents/trend_detection_agent.py — Trend Detection Agent.
+
+Deterministic scraping (no LLM reasoning involved) — per
+https://agentfactory.panaversity.org/'s Gate 1a, this is a fixed
+"call these feeds/endpoints, keyword-filter the results" procedure,
+so it follows the same plain-function style as news_api_agent.py
+rather than wrapping an LLM around it.
+"""
 import hashlib
-from datetime import datetime, timezone, timedelta
-from typing import List
+from datetime import UTC, datetime, timedelta
+from urllib.parse import quote_plus
+
+import feedparser
+import httpx
 from loguru import logger
 
-from core.models import RawStory, SourceType
 from config.settings import config
+from core.models import RawStory, SourceType
+
 
 # ── Helpers ───────────────────────────────────────────────
 def make_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
-def is_relevant(text: str) -> bool:
-    text_lower = text.lower()
-    has_keyword = any(k.lower() in text_lower
-                      for k in config.content.keywords)
+# Trusted sources that carry world news — bypass keyword filter
+TRUSTED_GLOBAL = {
+    "ap news", "reuters world", "bbc world", "bbc news", "al jazeera",
+    "france 24", "dw world", "the economist", "foreign policy",
+    "financial times", "wall street journal", "bloomberg", "cnbc",
+    "dawn pakistan", "the news pakistan", "tribune pakistan",
+    "middle east eye", "al monitor", "al arabiya", "radio free europe",
+    "guardian world", "reuters", "associated press", "un news",
+    "uk government", "bbc africa", "africanews", "news24",
+}
+
+# Category base scores — world/economy/conflict compete with tech
+CATEGORY_SCORES = {
+    # World affairs
+    "AP News":           80.0, "Reuters World":     80.0,
+    "BBC World":         80.0, "BBC News":           80.0,
+    "Al Jazeera":        78.0, "France 24":          75.0,
+    "DW World":          75.0, "Foreign Policy":     75.0,
+    "Radio Free Europe": 72.0, "Guardian World":     75.0,
+    "Middle East Eye":   72.0, "Al Arabiya":         70.0,
+    "Al Monitor":        70.0, "UN News":            72.0,
+    "UK Government":     70.0,
+    # Economy & markets
+    "Financial Times":   80.0, "Wall Street Journal":78.0,
+    "Bloomberg":         78.0, "CNBC":               75.0,
+    "MarketWatch":       72.0, "The Economist":      78.0,
+    "Business Insider":  68.0, "Economic Times":     68.0,
+    # Conflict
+    "Reuters":           78.0, "Defense News":       70.0,
+    "Breaking Defense":  68.0,
+    # Science / health
+    "Nature News":       70.0, "NASA News":          70.0,
+    "BBC Science":       68.0, "BBC Health":         68.0,
+    "WHO News":          70.0, "STAT News":          68.0,
+    # South Asia
+    "Dawn Pakistan":     72.0, "The News Pakistan":  68.0,
+    "Tribune Pakistan":  68.0,
+    # Africa
+    "BBC Africa":        78.0, "Africanews":         75.0,
+    "News24":            68.0, "AllAfrica":          65.0,
+}
+
+def get_rss_score(source_name: str) -> float:
+    return CATEGORY_SCORES.get(source_name, 60.0)
+
+def is_relevant(text: str, source_name: str = "") -> bool:
+    text_lower  = text.lower()
     has_excluded = any(e.lower() in text_lower
                        for e in config.content.excluded_keywords)
-    return has_keyword and not has_excluded
+    if has_excluded:
+        return False
+    # Trusted global sources don't need keyword match
+    if source_name.lower() in TRUSTED_GLOBAL:
+        return True
+    return any(k.lower() in text_lower for k in config.content.keywords)
 
 def is_recent(published: datetime) -> bool:
-    cutoff = datetime.now(timezone.utc) - timedelta(
+    cutoff = datetime.now(UTC) - timedelta(
         hours=config.content.lookback_hours
     )
     if published.tzinfo is None:
-        published = published.replace(tzinfo=timezone.utc)
+        published = published.replace(tzinfo=UTC)
     return published >= cutoff
 
-# ── Scraper 1: Google News RSS ─────────────────────────────
-def scrape_google_news() -> List[RawStory]:
+# ── Scraper 1: Google News RSS (multiple queries) ──────────
+def scrape_google_news() -> list[RawStory]:
     stories = []
-    query = config.content.niche.replace(" ", "+")
-    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    queries = [
+        "world news today",
+        "economy markets finance",
+        "war conflict geopolitics",
+        "AI technology",
+        "science climate health",
+    ]
 
-    try:
-        feed = feedparser.parse(url)
-        for entry in feed.entries[:20]:
-            title   = entry.get("title", "")
-            summary = entry.get("summary", title)
-            link    = entry.get("link", "")
+    for query in queries:
+        url = (f"https://news.google.com/rss/search"
+               f"?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en")
+        try:
+            # feedparser.parse(url) has no timeout of its own and can
+            # hang indefinitely on a slow/unresponsive server — fetch
+            # via httpx (bounded timeout) and hand feedparser the bytes.
+            resp = httpx.get(url, timeout=10, follow_redirects=True)
+            feed = feedparser.parse(resp.content)
+            added = 0
+            for entry in feed.entries[:15]:
+                title   = entry.get("title", "")
+                summary = entry.get("summary", title)
+                link    = entry.get("link", "")
+                if not title or not link:
+                    continue
+                if not is_relevant(title + " " + summary, "google news"):
+                    continue
+                try:
+                    published = datetime(*entry.published_parsed[:6],
+                                        tzinfo=UTC)
+                except Exception:
+                    published = datetime.now(UTC)
+                if not is_recent(published):
+                    continue
+                stories.append(RawStory(
+                    id           = make_id(link),
+                    title        = title,
+                    summary      = summary[:500],
+                    url          = link,
+                    source       = SourceType.GOOGLE_NEWS,
+                    source_name  = "Google News",
+                    published_at = published,
+                    score        = 70.0,
+                    keywords     = [k for k in config.content.keywords
+                                    if k.lower() in title.lower()],
+                ))
+                added += 1
+            if added:
+                logger.info(f"Google News [{query[:20]}]: {added} stories")
+        except Exception as e:
+            logger.error(f"Google News [{query}] failed: {e}")
 
-            if not is_relevant(title + " " + summary):
-                continue
-
-            published = datetime(*entry.published_parsed[:6],
-                                 tzinfo=timezone.utc)
-            if not is_recent(published):
-                continue
-
-            stories.append(RawStory(
-                id           = make_id(link),
-                title        = title,
-                summary      = summary[:500],
-                url          = link,
-                source       = SourceType.GOOGLE_NEWS,
-                source_name  = "Google News",
-                published_at = published,
-                score        = 50.0,
-                keywords     = [k for k in config.content.keywords
-                                if k.lower() in title.lower()],
-            ))
-        logger.info(f"Google News: {len(stories)} stories found")
-    except Exception as e:
-        logger.error(f"Google News scraper failed: {e}")
-
+    logger.info(f"Google News total: {len(stories)} stories")
     return stories
 
-# ── Scraper 2: Hacker News ─────────────────────────────────
-def scrape_hacker_news() -> List[RawStory]:
+# ── Scraper 2: Hacker News (capped score) ─────────────────
+def scrape_hacker_news() -> list[RawStory]:
     stories = []
     base = "https://hacker-news.firebaseio.com/v0"
 
     try:
-        resp = httpx.get(f"{base}/topstories.json", timeout=10)
+        resp    = httpx.get(f"{base}/topstories.json", timeout=10)
         top_ids = resp.json()[:50]
 
         for story_id in top_ids:
@@ -83,14 +159,17 @@ def scrape_hacker_news() -> List[RawStory]:
                 continue
 
             title = item.get("title", "")
-            url   = item.get("url", f"https://news.ycombinator.com/item?id={story_id}")
-            score = float(item.get("score", 0))
+            url   = item.get("url",
+                    f"https://news.ycombinator.com/item?id={story_id}")
+            # Cap at 80 so HN tech stories don't crowd out world news
+            raw_score = float(item.get("score", 0))
+            score     = min(raw_score, 80.0)
 
-            if not is_relevant(title):
+            if not is_relevant(title, "hacker news"):
                 continue
 
             published = datetime.fromtimestamp(
-                item.get("time", 0), tz=timezone.utc
+                item.get("time", 0), tz=UTC
             )
             if not is_recent(published):
                 continue
@@ -114,197 +193,85 @@ def scrape_hacker_news() -> List[RawStory]:
 
     return stories
 
-# ── Scraper 3: Reddit ──────────────────────────────────────
-def scrape_reddit() -> List[RawStory]:
+# ── Scraper 3: Reddit ─────────────────────────────────────
+def scrape_reddit() -> list[RawStory]:
     stories = []
-    subreddits = ["artificial", "cybersecurity", "MachineLearning",
-                  "netsec", "technology"]
-    headers = {"User-Agent": "ai-news-bot/1.0"}
+    subreddits = ["worldnews", "geopolitics", "economics",
+                  "artificial", "technology", "science"]
 
     for sub in subreddits:
         try:
-            url  = f"https://www.reddit.com/r/{sub}/hot.json?limit=20"
-            resp = httpx.get(url, headers=headers, timeout=10)
-            data = resp.json()
-            posts = data["data"]["children"]
+            url  = f"https://www.reddit.com/r/{sub}/hot.rss?limit=20"
+            # See scrape_google_news — feedparser.parse(url) has no
+            # timeout and can hang indefinitely; fetch via httpx instead.
+            resp = httpx.get(url, timeout=10, follow_redirects=True)
+            feed = feedparser.parse(resp.content)
 
-            for post in posts:
-                p     = post["data"]
-                title = p.get("title", "")
-                link  = "https://reddit.com" + p.get("permalink", "")
-                score = float(p.get("score", 0))
-                text  = p.get("selftext", "")
-
-                if not is_relevant(title + " " + text):
+            for entry in feed.entries[:20]:
+                title   = entry.get("title", "")
+                link    = entry.get("link", "")
+                summary = entry.get("summary", title)
+                if not title or not link:
                     continue
-
-                published = datetime.fromtimestamp(
-                    p.get("created_utc", 0), tz=timezone.utc
-                )
+                if not is_relevant(title + " " + summary):
+                    continue
+                try:
+                    published = datetime(*entry.published_parsed[:6],
+                                        tzinfo=UTC) \
+                        if hasattr(entry, "published_parsed") \
+                        and entry.published_parsed \
+                        else datetime.now(UTC)
+                except Exception:
+                    published = datetime.now(UTC)
                 if not is_recent(published):
                     continue
 
                 stories.append(RawStory(
                     id           = make_id(link),
                     title        = title,
-                    summary      = text[:500] if text else title,
+                    summary      = summary[:500],
                     url          = link,
                     source       = SourceType.REDDIT,
                     source_name  = f"r/{sub}",
                     published_at = published,
-                    score        = score,
+                    score        = 55.0,
                     keywords     = [k for k in config.content.keywords
                                     if k.lower() in title.lower()],
                 ))
-
         except Exception as e:
             logger.error(f"Reddit r/{sub} failed: {e}")
 
     logger.info(f"Reddit: {len(stories)} stories found")
     return stories
 
-# ── Scraper 4: Mainstream Media RSS ───────────────────────
-def scrape_mainstream_media() -> List[RawStory]:
+# ── Generic RSS feed scraper ──────────────────────────────
+def scrape_rss_feeds(feeds: dict) -> list[RawStory]:
+    """Scrape an arbitrary {source_name: feed_url} dict of RSS feeds."""
     stories = []
-
-    feeds = {
-        # ── Tech focused ───────────────────────────────────────
-        "TechCrunch":          "https://techcrunch.com/feed/",
-        "Wired":               "https://www.wired.com/feed/rss",
-        "Ars Technica":        "https://feeds.arstechnica.com/arstechnica/index",
-        "The Verge":           "https://www.theverge.com/rss/index.xml",
-        "MIT Tech Review":     "https://www.technologyreview.com/feed/",
-        "VentureBeat":         "https://venturebeat.com/feed/",
-        "ZDNet":               "https://www.zdnet.com/news/rss.xml",
-        "InfoQ":               "https://feed.infoq.com/",
-
-        # ── Global mainstream ──────────────────────────────────
-        "BBC Technology":      "http://feeds.bbci.co.uk/news/technology/rss.xml",
-        "Reuters Tech":        "https://feeds.reuters.com/reuters/technologyNews",
-        "Associated Press":    "https://rsshub.app/ap/topics/technology",
-        "Al Jazeera":          "https://www.aljazeera.com/xml/rss/all.xml",
-        "The Guardian Tech":   "https://www.theguardian.com/technology/rss",
-        "CNN Tech":            "http://rss.cnn.com/rss/edition_technology.rss",
-        "Forbes Tech":         "https://www.forbes.com/innovation/feed/",
-        "Washington Post Tech":"https://feeds.washingtonpost.com/rss/business/technology",
-        "The Economist":       "https://www.economist.com/science-and-technology/rss.xml",
-        "Deutsche Welle Tech": "https://rss.dw.com/xml/rss-en-tech",
-        "Bloomberg Tech":      "https://feeds.bloomberg.com/technology/news.rss",
-        "IEEE Spectrum":       "https://spectrum.ieee.org/feeds/feed.rss",
-
-        # ── AI specific ────────────────────────────────────────
-        "AI News":             "https://artificialintelligence-news.com/feed/",
-        "Google AI Blog":      "https://blog.google/technology/ai/rss/",
-        "OpenAI Blog":         "https://openai.com/blog/rss.xml",
-        "DeepMind Blog":       "https://deepmind.google/blog/rss.xml",
-        "Hugging Face Blog":   "https://huggingface.co/blog/feed.xml",
-        "Towards Data Science":"https://towardsdatascience.com/feed",
-
-        # ── Cybersecurity ──────────────────────────────────────
-        "The Hacker News":     "https://feeds.feedburner.com/TheHackersNews",
-        "Krebs Security":      "https://krebsonsecurity.com/feed/",
-        "Bleeping Computer":   "https://www.bleepingcomputer.com/feed/",
-        "Dark Reading":        "https://www.darkreading.com/rss.xml",
-        "SecurityWeek":        "https://feeds.feedburner.com/Securityweek",
-        "Threatpost":          "https://threatpost.com/feed/",
-        "CISA Alerts":         "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-        "Naked Security":      "https://nakedsecurity.sophos.com/feed/",
-
-        # ── Pakistan & South Asia ──────────────────────────────
-        "Dawn Pakistan":       "https://www.dawn.com/feeds/home",
-        "The News Pakistan":   "https://www.thenews.com.pk/rss/1/1",
-        "Tribune Pakistan":    "https://tribune.com.pk/feed/",
-        "Economic Times Tech": "https://economictimes.indiatimes.com/tech/rss",
-        "The Hindu Tech":      "https://www.thehindu.com/sci-tech/technology/feeder/default.rss",
-        "NDTV Tech":           "https://feeds.feedburner.com/ndtvnews-tech-gadgets",
-
-        # ── Middle East ────────────────────────────────────────
-        "Arab News Tech":      "https://www.arabnews.com/taxonomy/term/10251/rss.xml",
-        "Gulf News Tech":      "https://gulfnews.com/rss/technology",
-        "Khaleej Times":       "https://www.khaleejtimes.com/rss/technology",
-        "Al Monitor":          "https://www.al-monitor.com/rss",
-        "MENAFN":              "https://menafn.com/rss/rss.aspx",
-        "Wamda":               "https://www.wamda.com/feed",
-
-        # ── Far East & Asia Pacific ────────────────────────────
-        "South China Morning Post": "https://www.scmp.com/rss/91/feed",
-        "Nikkei Asia":         "https://asia.nikkei.com/rss/feed/nar",
-        "Tech in Asia":        "https://www.techinasia.com/feed",
-        "Channel News Asia":   "https://www.channelnewsasia.com/rssfeeds/8395744",
-        "Japan Times":         "https://www.japantimes.co.jp/feed/",
-        "Korea Herald":        "http://www.koreaherald.com/common/rss_xml.php?ct=102",
-        "Caixin Global":       "https://www.caixinglobal.com/rss/",
-
-        "KrASIA":              "https://kr-asia.com/feed",
-
-        # ── World Affairs & Politics ──────────────────────
-        "Foreign Policy":       "https://foreignpolicy.com/feed/",
-        "The Economist":        "https://www.economist.com/international/rss.xml",
-        "Middle East Eye":      "https://www.middleeasteye.net/rss",
-        "Al Arabiya":           "https://english.alarabiya.net/tools/rss",
-        "France 24":            "https://www.france24.com/en/rss",
-        "DW World":             "https://rss.dw.com/xml/rss-en-world",
-        "Radio Free Europe":    "https://www.rferl.org/api/epjfpqum",
-        "AP News":              "https://feeds.apnews.com/rss/TopNews",
-
-        # ── Economics & Markets ───────────────────────────
-        "CNBC":                 "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "MarketWatch":          "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-        "Financial Times":      "https://www.ft.com/rss/home",
-        "Wall Street Journal":  "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
-        "Economic Times":       "https://economictimes.indiatimes.com/rssfeeds/1977021501.cms",
-        "Business Insider":     "https://feeds.businessinsider.com/custom/all",
-
-        # ── Science & Climate ─────────────────────────────
-        "NASA News":            "https://www.nasa.gov/rss/dyn/breaking_news.rss",
-        "New Scientist":        "https://www.newscientist.com/feed/home/",
-        "Science Daily":        "https://www.sciencedaily.com/rss/all.xml",
-        "Nature News":          "https://www.nature.com/nature.rss",
-        "BBC Science":          "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-        "Guardian Science":     "https://www.theguardian.com/science/rss",
-        "Guardian Climate":     "https://www.theguardian.com/environment/climate-crisis/rss",
-
-        # ── Health & Medicine ─────────────────────────────
-        "BBC Health":           "https://feeds.bbci.co.uk/news/health/rss.xml",
-        "Reuters Health":       "https://feeds.reuters.com/reuters/healthNews",
-        "STAT News":            "https://www.statnews.com/feed/",
-        "Medical News Today":   "https://www.medicalnewstoday.com/rss",
-        "WHO News":             "https://www.who.int/rss-feeds/news-english.xml",
-
-        # ── War & Conflict ────────────────────────────────
-        "Defense News":         "https://www.defensenews.com/arc/outboundfeeds/rss/",
-        "Breaking Defense":     "https://breakingdefense.com/feed/",
-        "Conflict Monitor":     "https://www.crisisgroup.org/rss.xml",
-        "Reuters World":        "https://feeds.reuters.com/Reuters/worldNews",
-    }
 
     for source_name, feed_url in feeds.items():
         try:
-            feed = feedparser.parse(feed_url)
+            resp  = httpx.get(feed_url, timeout=10, follow_redirects=True)
+            feed  = feedparser.parse(resp.content)
+            score = get_rss_score(source_name)
             count = 0
 
             for entry in feed.entries[:15]:
                 title   = entry.get("title", "")
                 summary = entry.get("summary", title)
                 link    = entry.get("link", "")
-
                 if not title or not link:
                     continue
-                if not is_relevant(title + " " + summary):
+                if not is_relevant(title + " " + summary, source_name):
                     continue
-
-                # Parse published date
                 try:
-                    if hasattr(entry, "published_parsed") and entry.published_parsed:
-                        published = datetime(
-                            *entry.published_parsed[:6],
-                            tzinfo=timezone.utc
-                        )
-                    else:
-                        published = datetime.now(timezone.utc)
+                    published = datetime(
+                        *entry.published_parsed[:6], tzinfo=UTC
+                    ) if hasattr(entry, "published_parsed") \
+                      and entry.published_parsed \
+                      else datetime.now(UTC)
                 except Exception:
-                    published = datetime.now(timezone.utc)
-
+                    published = datetime.now(UTC)
                 if not is_recent(published):
                     continue
 
@@ -316,7 +283,7 @@ def scrape_mainstream_media() -> List[RawStory]:
                     source       = SourceType.RSS,
                     source_name  = source_name,
                     published_at = published,
-                    score        = 60.0,
+                    score        = score,
                     keywords     = [k for k in config.content.keywords
                                     if k.lower() in title.lower()],
                 ))
@@ -324,15 +291,126 @@ def scrape_mainstream_media() -> List[RawStory]:
 
             if count:
                 logger.info(f"  {source_name}: {count} stories")
-
         except Exception as e:
             logger.warning(f"  {source_name} feed failed: {e}")
 
+    return stories
+
+
+# ── Scraper 4: Mainstream Media RSS ───────────────────────
+def scrape_mainstream_media() -> list[RawStory]:
+    feeds = {
+        # ── World News (top priority — these lead the bulletin) ──
+        "AP News":              "https://feeds.apnews.com/rss/TopNews",
+        "Reuters World":        "https://feeds.reuters.com/Reuters/worldNews",
+        "BBC World":            "http://feeds.bbci.co.uk/news/world/rss.xml",
+        "Al Jazeera":           "https://www.aljazeera.com/xml/rss/all.xml",
+        "France 24":            "https://www.france24.com/en/rss",
+        "DW World":             "https://rss.dw.com/xml/rss-en-world",
+        "Guardian World":       "https://www.theguardian.com/world/rss",
+        "Radio Free Europe":    "https://www.rferl.org/api/epjfpqum",
+        "Foreign Policy":       "https://foreignpolicy.com/feed/",
+        # Tier 1 relies on the story URL's domain (.un.org, .who.int,
+        # .gov, etc.) to detect an official government/IGO source —
+        # these two feeds are what actually give it live un.org/gov.uk
+        # data instead of source-tier entries no scraper ever produces.
+        # (NATO's RSS feed URL is stale/404 as of this writing — left
+        # out rather than added as a knowingly-dead entry.)
+        "UN News":              "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+        "UK Government":        "https://www.gov.uk/search/news-and-communications.atom",
+
+        # ── Economy & Markets ─────────────────────────────────────
+        "Financial Times":      "https://www.ft.com/rss/home",
+        "Wall Street Journal":  "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
+        "Bloomberg":            "https://feeds.bloomberg.com/markets/news.rss",
+        "CNBC":                 "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+        "MarketWatch":          "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+        "The Economist":        "https://www.economist.com/international/rss.xml",
+        "Business Insider":     "https://feeds.businessinsider.com/custom/all",
+        "Economic Times":       "https://economictimes.indiatimes.com/rssfeeds/1977021501.cms",
+
+        # ── War & Conflict ────────────────────────────────────────
+        "Middle East Eye":      "https://www.middleeasteye.net/rss",
+        "Al Monitor":           "https://www.al-monitor.com/rss",
+        "Al Arabiya":           "https://english.alarabiya.net/tools/rss",
+        "Defense News":         "https://www.defensenews.com/arc/outboundfeeds/rss/",
+        "Breaking Defense":     "https://breakingdefense.com/feed/",
+
+        # ── Science & Climate ─────────────────────────────────────
+        "Nature News":          "https://www.nature.com/nature.rss",
+        "NASA News":            "https://www.nasa.gov/rss/dyn/breaking_news.rss",
+        "New Scientist":        "https://www.newscientist.com/feed/home/",
+        "Science Daily":        "https://www.sciencedaily.com/rss/all.xml",
+        "BBC Science":          "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+        "Guardian Science":     "https://www.theguardian.com/science/rss",
+        "Guardian Climate":     "https://www.theguardian.com/environment/climate-crisis/rss",
+
+        # ── Health & Medicine ─────────────────────────────────────
+        "BBC Health":           "https://feeds.bbci.co.uk/news/health/rss.xml",
+        "WHO News":             "https://www.who.int/rss-feeds/news-english.xml",
+        "STAT News":            "https://www.statnews.com/feed/",
+        "Reuters Health":       "https://feeds.reuters.com/reuters/healthNews",
+
+        # ── Technology & AI ───────────────────────────────────────
+        "TechCrunch":           "https://techcrunch.com/feed/",
+        "Wired":                "https://www.wired.com/feed/rss",
+        "Ars Technica":         "https://feeds.arstechnica.com/arstechnica/index",
+        "The Verge":            "https://www.theverge.com/rss/index.xml",
+        "MIT Tech Review":      "https://www.technologyreview.com/feed/",
+        "VentureBeat":          "https://venturebeat.com/feed/",
+        "ZDNet":                "https://www.zdnet.com/news/rss.xml",
+        "Bloomberg Tech":       "https://feeds.bloomberg.com/technology/news.rss",
+        "IEEE Spectrum":        "https://spectrum.ieee.org/feeds/feed.rss",
+        "OpenAI Blog":          "https://openai.com/blog/rss.xml",
+
+        # ── Pakistan & South Asia ─────────────────────────────────
+        "Dawn Pakistan":        "https://www.dawn.com/feeds/home",
+        "The News Pakistan":    "https://www.thenews.com.pk/rss/1/1",
+        "Tribune Pakistan":     "https://tribune.com.pk/feed/",
+        "Economic Times Tech":  "https://economictimes.indiatimes.com/tech/rss",
+
+        # ── Pakistan Media ──────────────────────────────────────────
+        "Geo News":             "https://www.geo.tv/rss/1",
+        "ARY News":             "https://arynews.tv/feed/",
+        "Samaa News":           "https://www.samaa.tv/feed/",
+        "APP News":             "https://www.app.com.pk/feed/",
+
+        # ── Middle East & Asia ────────────────────────────────────
+        "South China Morning Post": "https://www.scmp.com/rss/91/feed",
+        "Nikkei Asia":          "https://asia.nikkei.com/rss/feed/nar",
+        "Channel News Asia":    "https://www.channelnewsasia.com/rssfeeds/8395744",
+        "Japan Times":          "https://www.japantimes.co.jp/feed/",
+        "Caixin Global":        "https://www.caixinglobal.com/rss/",
+        "MENAFN":               "https://menafn.com/rss/rss.aspx",
+
+        # ── American World Impact ───────────────────────────────────
+        "CNN World":            "http://rss.cnn.com/rss/edition_world.rss",
+        "Washington Post":      "https://feeds.washingtonpost.com/rss/world",
+        "NPR World":            "https://feeds.npr.org/1004/rss.xml",
+        "ABC News World":       "https://abcnews.go.com/abcnews/internationalheadlines",
+
+        # ── Chinese Media ────────────────────────────────────────────
+        "CGTN":                 "https://www.cgtn.com/subscribe/rss/section/world.xml",
+        "China Daily":          "https://www.chinadaily.com.cn/rss/world_rss.xml",
+
+        # ── Additional Global ─────────────────────────────────────────
+        "TRT World":            "https://www.trtworld.com/rss",
+        "NHK World":            "https://www3.nhk.or.jp/rss/news/cat0.xml",
+        "The Hindu":            "https://www.thehindu.com/feeder/default.rss",
+
+        # ── Africa ─────────────────────────────────────────────────
+        "BBC Africa":           "https://feeds.bbci.co.uk/news/world/africa/rss.xml",
+        "Africanews":           "https://www.africanews.com/feed/rss",
+        "AllAfrica":            "https://allafrica.com/tools/headlines/rdf/latest/headlines.rdf",
+        "News24":               "https://feeds.news24.com/articles/news24/TopStories/rss",
+    }
+
+    stories = scrape_rss_feeds(feeds)
     logger.info(f"Mainstream Media: {len(stories)} total stories")
     return stories
 
 # ── Main agent function ────────────────────────────────────
-def run_trend_detection() -> List[RawStory]:
+def run_trend_detection() -> list[RawStory]:
     logger.info("Starting Trend Detection Agent...")
 
     all_stories = []
@@ -341,9 +419,8 @@ def run_trend_detection() -> List[RawStory]:
     all_stories.extend(scrape_reddit())
     all_stories.extend(scrape_mainstream_media())
 
-    # Remove duplicates by ID
-    seen = set()
-    unique = []
+    # Deduplicate by ID
+    seen, unique = set(), []
     for s in all_stories:
         if s.id not in seen:
             seen.add(s.id)

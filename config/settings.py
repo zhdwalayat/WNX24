@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,21 +13,34 @@ class APIConfig:
     newsapi_key: str = os.getenv("NEWSAPI_KEY", "")
     reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
     reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
-    youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")
+    youtube_api_key:    str = os.getenv("YOUTUBE_API_KEY", "")
+    youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
+    unsplash_access_key: str = os.getenv("UNSPLASH_ACCESS_KEY", "")
+    pexels_api_key:      str = os.getenv("PEXELS_API_KEY", "")
 
 @dataclass
 class ContentConfig:
     niche:                str   = "Global News — AI, Technology, Cybersecurity & World Affairs"
-    min_confidence_score: float = 0.7
+    min_confidence_score: float = 0.65  # was 0.75 — lowered so genuinely
+    # cross-confirmed regional stories (e.g. Africa, which has fewer
+    # overlapping wire services than the US/UK/EU and so scores lower
+    # even with real confirmation) can reach "verified" and actually
+    # compete for a lineup slot, instead of one confidence formula tuned
+    # around heavy Western wire-service duplication gatekeeping every show
+    # Breaking-news impact-score floor (agents/verification_agent.py:
+    # compute_impact_score) — a story qualifies for "breaking" if it
+    # clears EITHER this real-world-impact bar OR the show's engagement
+    # min_score, so a significant story doesn't need to have gone viral
+    # first, and a merely viral story doesn't crowd out a significant one.
+    min_impact_score:     float = 0.35
     words_per_minute:     int   = 150
     lookback_hours:       int   = 24
 
-    keywords: List[str] = field(default_factory=lambda: [
+    keywords: list[str] = field(default_factory=lambda: [
         # ── AI & Technology ───────────────────────────────
         "artificial intelligence", "AI", "machine learning",
-        "LLM", "GPT", "Claude", "Gemini", "cybersecurity",
-        "data breach", "OpenAI", "Anthropic", "ransomware",
-        "zero-day", "AGI", "AI regulation", "robotics",
+        "LLM", "GPT", "Claude", "Gemini",
+        "OpenAI", "Anthropic", "AGI", "AI regulation", "robotics",
         "deepfake", "neural network", "chatbot", "automation",
         "quantum computing", "semiconductor", "tech policy",
 
@@ -65,15 +78,28 @@ class ContentConfig:
         "nuclear", "troops", "invasion", "occupation",
         "humanitarian crisis", "refugee", "ceasefire",
         "peacekeeping", "NATO", "defence", "weapons",
+
+        # ── Pakistan ──────────────────────────────────────────────
+        "Pakistan", "Islamabad", "Karachi", "Lahore",
+        "Rawalpindi", "Peshawar", "Quetta",
+        "Prime Minister Pakistan", "Pakistan Army",
+        "COAS", "Supreme Court Pakistan",
+        "Pakistan floods", "Pakistan earthquake",
+        "IMF Pakistan", "Pakistani rupee",
+        "PTI", "PMLN", "PPP", "Pakistan government",
+        "Pakistan economy", "State Bank Pakistan",
+        "CPEC", "China Pakistan", "Pakistan India",
+        "Line of Control", "KPK", "Balochistan",
+        "Sindh", "Punjab Pakistan",
     ])
 
-    excluded_keywords: List[str] = field(default_factory=lambda: [
+    excluded_keywords: list[str] = field(default_factory=lambda: [
         "celebrity gossip", "reality TV", "entertainment",
         "sports score", "Hollywood", "Bollywood",
     ])
 
     # ── Regional source groupings ─────────────────────────
-    asia_sources: List[str] = field(default_factory=lambda: [
+    asia_sources: list[str] = field(default_factory=lambda: [
         "South China Morning Post", "Nikkei Asia", "Tech in Asia",
         "Channel News Asia", "Japan Times", "Korea Herald",
         "KrASIA", "Caixin Global", "Economic Times Tech",
@@ -82,47 +108,48 @@ class ContentConfig:
         "The News Pakistan", "Tribune Pakistan",
     ])
 
-    mideast_sources: List[str] = field(default_factory=lambda: [
+    mideast_sources: list[str] = field(default_factory=lambda: [
         "Arab News Tech", "Gulf News Tech", "Khaleej Times",
         "Al Monitor", "MENAFN", "Wamda", "Al Jazeera",
         "Arab News", "Gulf News", "Middle East Eye",
         "Iran International", "Al Arabiya",
     ])
 
-    cyber_sources: List[str] = field(default_factory=lambda: [
-        "The Hacker News", "Krebs Security", "Bleeping Computer",
-        "Dark Reading", "SecurityWeek", "Threatpost",
-        "CISA Alerts", "Naked Security",
-    ])
-
-    affairs_sources: List[str] = field(default_factory=lambda: [
+    affairs_sources: list[str] = field(default_factory=lambda: [
         "BBC News", "Reuters", "Associated Press",
         "Al Jazeera", "The Guardian", "Washington Post",
         "Foreign Policy", "The Economist",
     ])
 
-    economy_sources: List[str] = field(default_factory=lambda: [
+    economy_sources: list[str] = field(default_factory=lambda: [
         "Bloomberg Tech", "Reuters", "Financial Times",
         "Forbes Tech", "Wall Street Journal",
         "CNBC", "MarketWatch", "Economic Times",
     ])
 
-    science_sources: List[str] = field(default_factory=lambda: [
+    science_sources: list[str] = field(default_factory=lambda: [
         "MIT Tech Review", "Nature", "Science Daily",
         "NASA", "New Scientist", "IEEE Spectrum",
         "BBC Science", "Guardian Science",
     ])
 
-    health_sources: List[str] = field(default_factory=lambda: [
+    health_sources: list[str] = field(default_factory=lambda: [
         "WHO", "BBC Health", "Reuters Health",
         "Medical News Today", "WebMD", "STAT News",
         "The Lancet", "BMJ",
     ])
 
-    conflict_sources: List[str] = field(default_factory=lambda: [
+    conflict_sources: list[str] = field(default_factory=lambda: [
         "Al Jazeera", "BBC News", "Reuters",
         "Middle East Eye", "Defense News",
         "Jane's", "Associated Press", "AFP",
+    ])
+
+    pakistan_sources: list[str] = field(default_factory=lambda: [
+        "Geo News", "ARY News", "Samaa News",
+        "Dawn Pakistan", "Dawn", "The News",
+        "Express Tribune", "Tribune Pakistan",
+        "APP News",
     ])
 
 @dataclass
@@ -132,24 +159,27 @@ class AnchorConfig:
         "calm, authoritative, globally inclusive — "
         "trusted by audiences from Karachi to Tokyo"
     )
-    sign_off: str = "Stay informed. Stay ahead. This is Meridian."
-    opens: Dict[str, str] = field(default_factory=lambda: {
-        "breaking":     "Breaking news on Meridian World News.",
-        "morning":      "Good morning. This is Meridian World News.",
-        "world_affairs":"Welcome to World Affairs on Meridian.",
-        "asia":         "From across Asia, this is Meridian's Asia Tech Report.",
-        "economy":      "Markets are moving. This is Meridian Markets & Economy.",
-        "midday":       "Midday on Meridian World News.",
-        "deep_dive":    "Time for a deeper look. This is Meridian Deep Dive.",
-        "science":      "Exploring our world. This is Meridian Science & Climate Watch.",
-        "mideast":      "From the Middle East and South Asia, this is Meridian.",
-        "health":       "Your health matters. This is Meridian Health & Medicine.",
-        "evening":      "Good evening. This is Meridian World News.",
-        "cybersecurity":"Cyber threats are evolving. This is Meridian Cybersecurity Watch.",
-        "conflict":     "From conflict zones around the world, this is Meridian.",
-        "primetime":    "Prime time on Meridian World News.",
-        "summary":      "Here is your complete daily summary from Meridian World News.",
-        "default":      "This is Meridian.",
+    sign_off: str = "Stay informed. Stay ahead. This is WNX24."
+    opens: dict[str, str] = field(default_factory=lambda: {
+        "breaking":     "Breaking news on WNX24.",
+        "morning":      "Good morning. This is WNX24.",
+        "world_affairs":"Welcome to World Affairs on WNX24.",
+        "asia":         "From across Asia, this is WNX24's Asia Tech Report.",
+        "economy":      "Markets are moving. This is WNX24 Markets & Economy.",
+        "midday":       "Midday on WNX24.",
+        "deep_dive":    "Time for a deeper look. This is WNX24 Deep Dive.",
+        "science":      "Exploring our world. This is WNX24 Science & Climate Watch.",
+        "mideast":      "From the Middle East and South Asia, this is WNX24.",
+        "pakistan":     "From the Pakistan desk, this is WNX24. I'm Aria.",
+        "health":       "Your health matters. This is WNX24 Health & Medicine.",
+        "evening":      "Good evening. This is WNX24.",
+        "cybersecurity":"Cyber threats are evolving. This is WNX24 Cybersecurity Watch.",
+        "conflict":     "From conflict zones around the world, this is WNX24.",
+        "primetime":    "Prime time on WNX24.",
+        "summary":      "Here is your complete daily summary from WNX24.",
+        "explainer":    "Welcome to WNX24 Explainer. I'm Aria. Today we break down one story simply.",
+        "week_review":  "Good evening. I'm Aria. This is the WNX24 Week in Review.",
+        "default":      "This is WNX24.",
     })
 
 @dataclass
@@ -158,32 +188,39 @@ class ShowConfig:
     name:               str
     anchor_open:        str            # key into AnchorConfig.opens
     video_duration:     int            # seconds
-    schedule_pkt:       List[int] = field(default_factory=list)   # UTC+5 hours
+    schedule_pkt:       list[int] = field(default_factory=list)   # UTC+5 hours
     interval_minutes:   int  = 1440   # how often this show repeats
     lookback_minutes:   int  = 240    # how far back to search for stories
     story_count:        int  = 1
     is_breaking:        bool = False
     regional_focus:     str  = "global"
     min_score:          float = 0.0
+    min_score_tier4:    float | None = None  # stricter floor for Tier 4 (eyewitness/social) sources
 
 @dataclass
 class ChannelConfig:
-    name:     str = "Meridian World News"
-    tagline:  str = "Stay informed. Stay ahead."
-    handle:   str = "@MeridianWorldNews"
-    language: str = "en"
-    category_id: str = "25"   # YouTube: News & Politics
+    name:               str = "WNX24"
+    tagline:            str = "World News. Always."
+    handle:             str = "@WNX24"
+    language:           str = "en"
+    category_id:        str = "25"   # YouTube: News & Politics
+    youtube_channel_id: str = os.getenv("YOUTUBE_CHANNEL_ID", "")
+    # Observed: channel hit YouTube's uploadLimitExceeded after ~10
+    # real uploads within an hour. Conservative default — raise via
+    # env var once the channel's actual limit is confirmed (e.g. after
+    # phone verification or as the channel ages).
+    max_daily_uploads:  int = int(os.getenv("YOUTUBE_MAX_DAILY_UPLOADS", "10"))
 
 @dataclass
 class SchedulerConfig:
-    shows: Dict[str, ShowConfig] = field(default_factory=lambda: {
+    shows: dict[str, ShowConfig] = field(default_factory=lambda: {
 
         "breaking": ShowConfig(
             id="breaking", name="Breaking News",
             anchor_open="breaking", schedule_pkt=[],
             interval_minutes=30, lookback_minutes=30,
             video_duration=60, story_count=1,
-            min_score=200.0, is_breaking=True,
+            min_score=50.0, min_score_tier4=75.0, is_breaking=True,
         ),
 
         "morning": ShowConfig(
@@ -192,6 +229,31 @@ class SchedulerConfig:
             interval_minutes=1440, lookback_minutes=480,
             video_duration=300, story_count=5,
             min_score=30.0,
+        ),
+
+        "explainer": ShowConfig(
+            id               = "explainer",
+            name             = "WNX24 Explainer",
+            anchor_open      = "explainer",
+            schedule_pkt     = [8],
+            interval_minutes = 1440,
+            lookback_minutes = 480,
+            video_duration   = 150,
+            story_count      = 1,
+            min_score        = 25.0,
+        ),
+
+        "pakistan": ShowConfig(
+            id               = "pakistan",
+            name             = "Pakistan Report",
+            anchor_open      = "pakistan",
+            schedule_pkt     = [8, 14, 20],
+            interval_minutes = 480,
+            lookback_minutes = 480,
+            video_duration   = 180,
+            story_count      = 3,
+            min_score        = 20.0,
+            regional_focus   = "pakistan",
         ),
 
         "world_affairs": ShowConfig(
@@ -266,14 +328,6 @@ class SchedulerConfig:
             min_score=40.0,
         ),
 
-        "cybersecurity": ShowConfig(
-            id="cybersecurity", name="Cybersecurity Watch",
-            anchor_open="cybersecurity", schedule_pkt=[19],
-            interval_minutes=1440, lookback_minutes=480,
-            video_duration=180, story_count=3,
-            min_score=20.0, regional_focus="cyber",
-        ),
-
         "conflict": ShowConfig(
             id="conflict", name="War & Conflict Report",
             anchor_open="conflict", schedule_pkt=[20],
@@ -296,6 +350,18 @@ class SchedulerConfig:
             interval_minutes=1440, lookback_minutes=1440,
             video_duration=600, story_count=10,
             min_score=20.0,
+        ),
+
+        "week_review": ShowConfig(
+            id               = "week_review",
+            name             = "WNX24 Week in Review",
+            anchor_open      = "week_review",
+            schedule_pkt     = [20],
+            interval_minutes = 10080,
+            lookback_minutes = 10080,
+            video_duration   = 600,
+            story_count      = 5,
+            min_score        = 20.0,
         ),
     })
 
