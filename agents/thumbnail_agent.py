@@ -1,18 +1,29 @@
+"""agents/thumbnail_agent.py — Thumbnail Agent.
+
+Deterministic templating (no LLM reasoning) — per
+https://agentfactory.panaversity.org/'s Gate 1a, compositing a
+headline/background/badge onto a fixed 1280x720 canvas with PIL is
+"one exact step that is the same every time," not agent work. The
+headline text itself is delegated to agents/headline_agent.py (a
+genuine agent), with the raw story title as a fallback if that call
+fails.
+"""
 import os
 import textwrap
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
-from loguru import logger
 
-from core.models import VerifiedStory, VideoScript, Thumbnail
+from loguru import logger
+from PIL import Image, ImageDraw, ImageFont
+
 from config.settings import config
+from core.models import Thumbnail, VerifiedStory, VideoScript
 
 # ── Constants ──────────────────────────────────────────────
 W, H        = 1280, 720
 FONT_DIR    = os.path.join(os.path.dirname(__file__), "..", "assets", "fonts")
 OUTPUT_DIR  = os.path.join(config.output_dir, "thumbnails")
 
-# ── Colours — Meridian brand ───────────────────────────────
+# ── Colours — WNX24 brand ───────────────────────────────
 COLOURS = {
     "bg_dark":      "#0d1117",
     "bg_panel":     "#161b22",
@@ -37,6 +48,14 @@ SHOW_ACCENTS = {
     "midday":       "#1d8cf8",
     "deep_dive":    "#ffd700",
     "mideast":      "#e63946",
+    "explainer":    "#17c3b2",
+    "pakistan":     "#2ecc71",
+    "world_affairs":"#4a90d9",
+    "economy":      "#f4b400",
+    "science":      "#9b59b6",
+    "health":       "#48dbfb",
+    "conflict":     "#c0392b",
+    "week_review":  "#ffd700",
     "primetime":    "#7b2d8b",
     "summary":      "#1d8cf8",
     "default":      "#1d8cf8",
@@ -46,8 +65,6 @@ SHOW_ACCENTS = {
 def hex_rgb(colour: str) -> tuple:
     h = colour.lstrip("#")
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-_hex = hex_rgb
 
 
 def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -61,8 +78,6 @@ def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
         except Exception:
             return ImageFont.load_default()
 
-_load_font = load_font
-
 
 def draw_rounded_rect(
     draw:   ImageDraw.ImageDraw,
@@ -74,7 +89,7 @@ def draw_rounded_rect(
     draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill)
 
 
-def make_headline(title: str, max_words: int = 10) -> str:
+def make_headline(title: str, max_words: int = 5) -> str:
     words = title.split()
     if len(words) <= max_words:
         return title.upper()
@@ -105,7 +120,7 @@ def create_thumbnail(
     # Channel name
     draw.text(
         (24, 38),
-        "Meridian World News",
+        "WNX24",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(36, bold=True),
         anchor = "lm",
@@ -132,6 +147,14 @@ def create_thumbnail(
         "cybersecurity":"● CYBER WATCH",
         "primetime":    "● PRIME TIME",
         "summary":      "● DAILY SUMMARY",
+        "explainer":    "● EXPLAINER",
+        "pakistan":     "● PAKISTAN",
+        "world_affairs":"● WORLD AFFAIRS",
+        "economy":      "● MARKETS",
+        "science":      "● SCIENCE",
+        "health":       "● HEALTH",
+        "conflict":     "● CONFLICT",
+        "week_review":  "● WEEK REVIEW",
     }.get(show_id, "● LIVE")
 
     font_badge = load_font(24, bold=True)
@@ -155,7 +178,16 @@ def create_thumbnail(
     draw.rectangle([24, 148, 180, 154], fill=hex_rgb(accent))
 
     # ── Main headline ──────────────────────────────────────
-    headline = make_headline(story.raw.title, max_words=8)
+    # headline_agent gives a punchier, LLM-written headline than the raw
+    # scraped title; fall back to the title itself if that call fails so
+    # a thumbnail can never fail to render because of it.
+    try:
+        from agents.headline_agent import run_headline_agent
+        raw_headline = run_headline_agent(story)
+    except Exception as e:
+        logger.warning(f"Headline Agent failed, falling back to story title: {e}")
+        raw_headline = story.raw.title
+    headline = make_headline(raw_headline, max_words=8)
 
     if len(headline) <= 30:
         fnt = load_font(68, bold=True)
@@ -220,7 +252,7 @@ def create_thumbnail(
     )
     draw.text(
         (W // 2, H - 30),
-        f"Meridian World News  |  {timestamp}",
+        f"WNX24  |  {timestamp}",
         fill   = hex_rgb(COLOURS["text_white"]),
         font   = load_font(22),
         anchor = "mm",
@@ -232,6 +264,17 @@ def create_thumbnail(
         font   = load_font(20),
         anchor = "rm",
     )
+
+    # ── WNX24 logo watermark ──────────────────────────────
+    logo_path = "assets/WNX24_thumb_logo.png"
+    if os.path.exists(logo_path):
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+            logo = logo.resize((80, 80), Image.LANCZOS)
+            # Position: top right corner
+            img.paste(logo, (img.width - 90, 10), logo)
+        except Exception as e:
+            logger.warning(f"Could not add logo watermark: {e}")
 
     # ── Save ───────────────────────────────────────────────
     filename   = f"thumb_{story.raw.id}_{show_id}.jpg"
@@ -253,7 +296,7 @@ def run_thumbnail_agent(
     show_id: str = "breaking",
 ) -> Thumbnail:
 
-    logger.info("Starting Thumbnail Agent — Meridian World News")
+    logger.info("Starting Thumbnail Agent — WNX24")
     thumbnail = create_thumbnail(story, script, show_id)
     logger.info(f"Thumbnail Agent complete — {thumbnail.image_path}")
     return thumbnail

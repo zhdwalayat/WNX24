@@ -1,11 +1,13 @@
 # utils/helpers.py
-import os
 import json
-import hashlib
+import os
 from datetime import datetime
 from typing import Any
+
 from loguru import logger
+
 from config.settings import config
+
 
 def ensure_dirs():
     for d in ["videos", "thumbnails", "metadata", "logs"]:
@@ -22,7 +24,7 @@ def save_json(data: Any, filename: str) -> str:
 
 def load_json(path: str) -> Any:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"Failed to load JSON: {e}")

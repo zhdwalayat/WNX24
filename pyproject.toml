@@ -6,23 +6,53 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "aiofiles>=25.1.0",
+    "apscheduler>=3.11.2",
     "beautifulsoup4>=4.14.3",
+    "ddgs>=9.14.4",
     "edge-tts>=7.2.8",
     "fastapi>=0.135.3",
     "feedparser>=6.0.12",
     "google-api-python-client>=2.194.0",
+    "google-auth-httplib2>=0.3.1",
+    "google-auth-oauthlib>=1.4.0",
     "groq>=1.1.2",
     "httpx>=0.28.1",
     "imageio-ffmpeg>=0.6.0",
     "jinja2>=3.1.6",
     "loguru>=0.7.3",
-    "moviepy>=1.0.3",
+    "numpy>=2.1.0",
     "openai>=2.31.0",
     "pillow>=12.2.0",
     "pydantic>=2.13.0",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.26",
+    "pytz>=2026.2",
     "requests>=2.33.1",
-    "schedule>=1.2.2",
     "uvicorn>=0.44.0",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.0",
+    "pytest>=8.3.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = [
+    "E501",  # line length — this codebase aligns assignments/params by hand
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "unit: fast, isolated unit tests",
+    "integration: tests that touch the filesystem or a local DB",
 ]

@@ -1,12 +1,14 @@
 # main.py
-import sys
 import os
+import sys
+
 from loguru import logger
+
 from utils.helpers import ensure_dirs
 
 # ── Configure logging ──────────────────────────────────────
 logger.add(
-    os.path.join("output", "logs", "meridian_{time:YYYY-MM-DD}.log"),
+    os.path.join("output", "logs", "wnx24_{time:YYYY-MM-DD}.log"),
     rotation = "1 day",
     retention = "7 days",
     level    = "INFO",
@@ -18,12 +20,12 @@ def main():
 
     logger.info("")
     logger.info("╔══════════════════════════════════════════╗")
-    logger.info("║      MERIDIAN WORLD NEWS — STARTING      ║")
-    logger.info("║      'Where the world meets.'            ║")
+    logger.info("║             WNX24 — STARTING             ║")
+    logger.info("║          'World News. Always.'           ║")
     logger.info("╚══════════════════════════════════════════╝")
     logger.info("")
 
-    from orchestrator import start_24_7, run_now
+    from orchestrator import run_now, start_24_7
 
     if len(sys.argv) > 1:
         show_id = sys.argv[1]

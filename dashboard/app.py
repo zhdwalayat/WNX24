@@ -1,21 +1,22 @@
 """
-dashboard/app.py — Meridian World News Control Room
+dashboard/app.py — WNX24 Control Room
 Interactive dashboard with live pipeline execution.
 
 Run:  uvicorn dashboard.app:app --reload --port 8000
 Open: http://localhost:8000
 """
 
-import os
-import sys
-import json
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Any
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -24,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import config
 
-app = FastAPI(title="Meridian World News — Control Room")
+app = FastAPI(title="WNX24 Control Room")
 
 # ── Static files & templates ───────────────────────────────
 BASE      = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -37,10 +38,30 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
 # ── In-memory state ────────────────────────────────────────
-broadcast_log:     List[Dict]     = []
-broadcast_history: List[Dict]     = []
-current_run:       Dict[str, Any] = {}
+broadcast_log:     list[dict]     = []
+broadcast_history: list[dict]     = []
+current_run:       dict[str, Any] = {}
 is_running:        bool           = False
+
+# ── Broadcast deduplication ────────────────────────────────
+_HISTORY_FILE = Path("output/metadata/broadcast_history.json")
+
+def _load_broadcast_ids() -> set:
+    try:
+        if _HISTORY_FILE.exists():
+            return set(json.loads(_HISTORY_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+def _save_broadcast_ids(ids: set) -> None:
+    try:
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_FILE.write_text(json.dumps(list(ids), indent=2))
+    except Exception:
+        pass
+
+_broadcast_ids: set = _load_broadcast_ids()
 
 
 def _log(msg: str, status: str = "info"):
@@ -95,6 +116,13 @@ async def run_pipeline(show_id: str):
         fresh = [s for s in verified if s.status.value == "verified"]
         if not fresh:
             _log("No verified stories — aborting broadcast", "error")
+            is_running = False
+            return
+
+        # Filter out stories already broadcast (deduplication)
+        fresh = [s for s in fresh if s.raw.id not in _broadcast_ids]
+        if not fresh:
+            _log("All top stories already broadcast — no new content", "warning")
             is_running = False
             return
 
@@ -172,7 +200,7 @@ async def run_pipeline(show_id: str):
             story=top, script=script, video=video, thumbnail=thumbnail
         )
 
-        url = await loop.run_in_executor(None, run_uploader_agent, package)
+        url = await loop.run_in_executor(None, run_uploader_agent, package, show)
 
         if config.api.youtube_api_key:
             _log(f"         Uploaded — {url}", "success")
@@ -182,6 +210,11 @@ async def run_pipeline(show_id: str):
         current_run["youtube_url"] = url
         current_run["title"]       = package.title or script.hook
         current_run["completed_at"] = datetime.now().isoformat()
+
+        # Mark story as broadcast so it won't be re-uploaded
+        for s in fresh[:show.story_count]:
+            _broadcast_ids.add(s.raw.id)
+        _save_broadcast_ids(_broadcast_ids)
 
         _log("", "info")
         _log(f"BROADCAST COMPLETE — {show.name}", "success")
@@ -272,8 +305,17 @@ async def list_outputs():
     if not VIDEO_DIR.exists():
         return JSONResponse({"outputs": []})
 
+    # BroadcastOS names files "{show_id}_{story_id}_broadcastos_{timestamp}.mp4"
+    # — story_id is always a 12-char hex hash (agents/trend_detection_agent.py's
+    # md5(url)[:12] or a uuid4 fallback), so pull it out from the middle of the
+    # filename rather than using the whole stem, which would never match the
+    # per-story metadata/stats sidecar files. Falls back to the whole stem for
+    # any older/differently-named video (e.g. the legacy avatar_agent pipeline).
+    _STORY_ID_RE = re.compile(r"_([0-9a-f]{12})_broadcastos_")
+
     for video_file in sorted(VIDEO_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True):
-        story_id = video_file.stem          # e.g. 26c53171811e
+        m = _STORY_ID_RE.search(video_file.stem)
+        story_id = m.group(1) if m else video_file.stem
 
         # Find matching thumbnail (any show suffix)
         thumb_files = list(THUMB_DIR.glob(f"thumb_{story_id}_*.jpg")) if THUMB_DIR.exists() else []
@@ -290,8 +332,20 @@ async def list_outputs():
         meta_files = list(META_DIR.glob(f"{story_id}_metadata.json")) if META_DIR.exists() else []
         if meta_files:
             try:
-                with open(meta_files[0]) as f:
+                with open(meta_files[0], encoding="utf-8") as f:
                     meta = json.load(f)
+            except Exception:
+                pass
+
+        # Story statistics — not shown in the broadcast video itself, only
+        # here for admin review (broadcast_os.orchestrator saves this
+        # sidecar file per broadcast; see _save_stats_for_dashboard).
+        stats = {}
+        stats_files = list(META_DIR.glob(f"{story_id}_stats.json")) if META_DIR.exists() else []
+        if stats_files:
+            try:
+                with open(stats_files[0], encoding="utf-8") as f:
+                    stats = json.load(f)
             except Exception:
                 pass
 
@@ -307,6 +361,98 @@ async def list_outputs():
             "tags":       meta.get("tags", [])[:5],
             "size_mb":    size_mb,
             "created_at": mtime,
+            "stats":      stats,
         })
 
     return JSONResponse({"outputs": items})
+
+
+# ── Health endpoint ────────────────────────────────────────
+@app.get("/health")
+async def health_check():
+    from datetime import datetime
+
+    from core.database import get_stats
+
+    # Check DB
+    try:
+        stats = get_stats()
+        db_ok = True
+    except Exception:
+        stats = {}
+        db_ok = False
+
+    # Check last broadcast time
+    last_broadcast          = None
+    last_broadcast_age_mins = None
+    if broadcast_history and current_run.get("completed_at"):
+        try:
+            last_dt = datetime.fromisoformat(
+                current_run["completed_at"]
+            )
+            last_broadcast = last_dt.strftime("%d %b %Y %H:%M PKT")
+            diff = datetime.now() - last_dt.replace(tzinfo=None)
+            last_broadcast_age_mins = int(diff.total_seconds() / 60)
+        except Exception:
+            pass
+
+    # Check API keys
+    api_status = {
+        "groq":    bool(config.api.groq_api_key),
+        "heygen":  bool(config.api.heygen_api_key),
+        "youtube": bool(config.api.youtube_api_key),
+    }
+
+    # Overall system status
+    critical_ok = db_ok and api_status["groq"]
+    status      = "healthy" if critical_ok else "degraded"
+
+    return JSONResponse({
+        "status":        status,
+        "channel":       config.channel.name,
+        "timestamp":     datetime.now(UTC).isoformat(),
+        "timestamp_pkt": datetime.now().strftime("%d %b %Y %H:%M PKT"),
+        "pipeline": {
+            "is_running":              is_running,
+            "last_broadcast":          last_broadcast,
+            "last_broadcast_age_mins": last_broadcast_age_mins,
+            "total_broadcasts":        len(broadcast_history),
+        },
+        "database": {
+            "ok":        db_ok,
+            "new":       stats.get("new",       0),
+            "broadcast": stats.get("broadcast", 0),
+            "rejected":  stats.get("rejected",  0),
+        },
+        "api_keys": api_status,
+        "shows":    len(config.scheduler.shows),
+        "version":  "1.0.0",
+    }, status_code=200 if status == "healthy" else 503)
+
+
+# ── Corrections endpoint ───────────────────────────────────
+@app.post("/correct/{story_id}")
+async def flag_correction(story_id: str, note: str = ""):
+    """Flag a broadcast story as incorrect — drafts a public correction
+    via agents/corrections_agent.py, publishes it to the video
+    (description + comment) if it's a real upload, and records it in
+    the `corrections` table regardless."""
+    if not note:
+        return JSONResponse(
+            {"error": "note is required — describe what was wrong"},
+            status_code=400,
+        )
+    try:
+        from agents.corrections_agent import run_corrections_agent
+        result = run_corrections_agent(story_id, note)
+        _log(
+            f"Correction published for story {story_id}: "
+            f"{result['correction_text'][:80]}",
+            "warning",
+        )
+        return JSONResponse({"status": "published" if result["published"] else "recorded", **result})
+
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
