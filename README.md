@@ -1,10 +1,13 @@
 # WNX24 — "World News. Always."
 
-WNX24 is a fully autonomous, AI-powered news broadcast pipeline. It scrapes
-breaking news from ~60 RSS/news sources, verifies and scores stories for
-credibility, writes broadcast-style scripts with an LLM, generates narrated
-video with an AI anchor, builds a thumbnail, and uploads the finished video
-to YouTube — on a 24/7 schedule across 17 different shows.
+WNX24 ("World News. Always.") is a fully autonomous, AI-powered news broadcast
+pipeline. It collects breaking stories from about 60 RSS and news sources,
+scores them for credibility, and cross-verifies them across sources. It gathers
+supporting evidence, writes broadcast-style scripts with an LLM, and runs each
+script through editorial and mandatory legal/ethics review. It then produces
+narrated 1080p video with an AI anchor, lower thirds and a headline ticker,
+builds a thumbnail, and uploads the result to YouTube. A scheduler runs 17
+distinct shows around the clock, and a FastAPI health dashboard monitors it.
 
 ## How it works
 
